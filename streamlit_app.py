@@ -706,8 +706,7 @@ with st.expander("Build a question"):
 # ---- End Query Builder ----
 prefill = st.session_state.get("q_prefill", "")
 q = st.text_input("Type your question", value=prefill)
-    if q and df is not None:
-        f_multi = parse_question_multi(q)
+
 
         # ---- Title-count intent (with athlete auto-detect)  (Fix #3) ----
         if f_multi.get("intent") == "count_titles":
