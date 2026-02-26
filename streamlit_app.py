@@ -178,38 +178,54 @@ def load_champions(file_bytes: bytes) -> pd.DataFrame:
     return out
 
 # ----------------------------
-# Workbook parsing helpers — MVPs
+# # ----------------------------
+# Workbook parsing helpers — MVPs (UPDATED for: school to the right; co-MVPs in same season block)
 # ----------------------------
 MVP_CATEGORY_MAP = {
     "Girls Indoor Track and Field": ("GIRLS", "Indoor"),
     "Boys Indoor Track and Field": ("BOYS", "Indoor"),
     "Girls Outdoor Track and Field": ("GIRLS", "Outdoor"),
     "Boys Outdoor Track and Field": ("BOYS", "Outdoor"),
-    # Optional (kept for completeness; you can use the tab to browse these):
+    # Optional (present in your sheet)
     "Girls Cross Country": ("GIRLS", "Cross Country"),
     "Boys Cross Country": ("BOYS", "Cross Country"),
 }
 
 def _find_header_row(ws) -> Optional[int]:
-    """Find header row containing 'Year' and at least one MVP category header."""
+    """
+    Find the header row that contains 'Year' and at least one MVP category header.
+    In your file this is row 1, with column layout:
+      A=Year, B=Girls CC, C=<school>, D=Boys CC, E=<school>, F=Girls Indoor, G=<school>, ...
+    """
     maxr = ws.max_row
     for r in range(1, min(maxr, 50) + 1):
         c1 = ws.cell(row=r, column=1).value
         if isinstance(c1, str) and c1.strip().lower() == "year":
+            # Verify at least one category header is present across the row
             headers = [ws.cell(row=r, column=c).value for c in range(2, ws.max_column + 1)]
             header_set = {str(h).strip() for h in headers if h}
             if header_set & set(MVP_CATEGORY_MAP.keys()):
                 return r
     return None
 
-
 def _parse_season_label(lbl) -> Tuple[Optional[int], Optional[int], Optional[str]]:
     """
-    Convert season label like '2024-25' → (2024, 2025, '2024-25').
-    If '2010' → (2010, 2010, '2010').
+    Convert a season-year marker to (season_start, season_end, label).
+      • '2024-25' → (2024, 2025, '2024-25')
+      • '2010'    → (2010, 2010, '2010')
+      • datetime  → (YYYY, YYYY, 'YYYY')
     """
     if lbl is None:
         return None, None, None
+    # datetime-like year cell (older rows in your sheet use dates)
+    try:
+        import datetime as _dt
+        if isinstance(lbl, _dt.datetime) or isinstance(lbl, _dt.date):
+            y = int(lbl.year)
+            return y, y, str(y)
+    except Exception:
+        pass
+
     s = str(lbl).strip()
     m = re.match(r"^(20\d{2})\s*[-/]\s*(\d{2}|\d{4})$", s)
     if m:
@@ -223,13 +239,18 @@ def _parse_season_label(lbl) -> Tuple[Optional[int], Optional[int], Optional[str
         return y, y, s
     return None, None, None
 
-
 @st.cache_data(show_spinner=False)
 def load_mvps(file_bytes: bytes) -> pd.DataFrame:
     """
-    Parse the MVPs sheet into a tidy DataFrame with columns:
+    Parse MVPs using your sheet’s layout:
+      • Year in the leftmost 'Year' column marks a new season block.
+      • For each category column, the MVP's name is in that column;
+        the school is in the column immediately to the right.
+      • Any additional name rows before the next 'Year' cell are co‑MVPs
+        for that same season/category.
+
+    Output columns:
       season_label, season_start, season_end, category, gender, scope, name, school
-    Robust to the two-row per season pattern (name row then school row).
     """
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     if "MVPs" not in wb.sheetnames:
@@ -243,39 +264,62 @@ def load_mvps(file_bytes: bytes) -> pd.DataFrame:
             "season_label","season_start","season_end","category","gender","scope","name","school"
         ])
 
-    headers = {}
+    # Locate the 'Year' column (usually column 1) and every MVP category column.
+    year_col = None
+    cat_cols: Dict[str, Tuple[int, int]] = {}  # category -> (name_col, school_col)
     for c in range(1, ws.max_column + 1):
-        val = ws.cell(row=header_row, column=c).value
-        if val:
-            headers[str(val).strip()] = c
+        v = ws.cell(row=header_row, column=c).value
+        if not v:
+            continue
+        label = str(v).strip()
+        if label.lower() == "year":
+            year_col = c
+        elif label in MVP_CATEGORY_MAP:
+            # school sits immediately to the right (c+1)
+            name_col, school_col = c, c + 1
+            cat_cols[label] = (name_col, school_col)
 
-    target_cols = {cat: col for cat, col in headers.items() if cat in MVP_CATEGORY_MAP}
+    if year_col is None or not cat_cols:
+        return pd.DataFrame(columns=[
+            "season_label","season_start","season_end","category","gender","scope","name","school"
+        ])
+
+    # Data begins below header. Your sheet has an awards row at header_row+1,
+    # then actual data begins at header_row+2 (e.g., '2025-26' appears there).
+    start_row = header_row + 1
+    current = {"season_label": None, "season_start": None, "season_end": None}
 
     records = []
-    r = header_row + 1
-    while r <= ws.max_row:
-        year_cell = ws.cell(row=r, column=1).value
-        y1, y2, season_label = _parse_season_label(year_cell)
-        if season_label is None:
-            r += 1
+    for r in range(start_row, ws.max_row + 1):
+        ycell = ws.cell(row=r, column=year_col).value
+        if ycell not in (None, ""):
+            y1, y2, lbl = _parse_season_label(ycell)
+            if lbl:
+                current = {"season_label": lbl, "season_start": y1, "season_end": y2}
+            else:
+                # invalid year marker; skip this row but keep last valid season
+                pass
+
+        # No valid season yet? Skip names until we meet a year marker
+        if not current["season_label"]:
             continue
-        # Row r: names; Row r+1: schools
-        for cat, col in target_cols.items():
-            name = ws.cell(row=r, column=col).value
-            school = ws.cell(row=r + 1, column=col).value if r + 1 <= ws.max_row else None
-            if name:
+
+        # For each category, capture name (if present) + its school to the right.
+        for cat, (name_col, school_col) in cat_cols.items():
+            name = ws.cell(row=r, column=name_col).value
+            if name not in (None, ""):
+                school = ws.cell(row=r, column=school_col).value if school_col <= ws.max_column else None
                 gender, scope = MVP_CATEGORY_MAP[cat]
                 records.append({
-                    "season_label": season_label,
-                    "season_start": y1,
-                    "season_end": y2,
+                    "season_label": current["season_label"],
+                    "season_start": current["season_start"],
+                    "season_end": current["season_end"],
                     "category": cat,
                     "gender": gender,
                     "scope": scope,   # 'Indoor' | 'Outdoor' | 'Cross Country'
                     "name": str(name).strip(),
                     "school": str(school).strip() if school else None,
                 })
-        r += 2
 
     df = pd.DataFrame.from_records(records).drop_duplicates().reset_index(drop=True)
     return df
