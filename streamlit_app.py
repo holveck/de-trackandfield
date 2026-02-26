@@ -39,7 +39,6 @@ MEETS = {
     "New Castle County": {"ncc", "new castle", "new castle co"},
     "Henlopen Conference": {"henlopen"},
     "Indoor State Championship": {"indoor", "indoor state", "state indoor", "indoor championship"},
-}
 MEET_CANONICAL = {}
 for k, vals in MEETS.items():
     MEET_CANONICAL[k.lower()] = k
