@@ -1,16 +1,16 @@
 # streamlit_app.py
 # ---------------------------------------------------------
 # Delaware HS Track & Field Champions Q&A — Streamlit
-# Bundled workbook version (no upload required).
+# Bundled workbook build (no upload required).
 #
-# How it works:
-#   • Detects year bundles on row 1: [Year][Name][Class][School][Mark] in 4-col groups
-#   • Reads event labels from column A and meet labels from column E
-#   • Normalizes GIRLS + BOYS into one table: gender, event, meet, year, name, class, school, mark
+# Features:
+#   • Bundled, path-safe loader for the Excel workbook
+#   • Parses GIRLS + BOYS champions into a normalized table
+#   • Natural-language Q&A (events/meets/years + "how many state titles ...")
+#   • Athlete Profiles tab: title counts & breakdowns (relays excluded)
+#   • Explore tab + Data Status tab for quick validation
 #
-# Notes:
-#   • Place "Delaware Track and Field Supersheet (6).xlsx" in the same folder as this file.
-#   • The parser expects GIRLS and BOYS sheets with the layout described above.
+# Place "Delaware Track and Field Supersheet (6).xlsx" in the same folder.
 
 import io
 import re
@@ -21,7 +21,6 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import openpyxl
-
 
 # ----------------------------
 # Canonical dictionaries & aliases
@@ -76,6 +75,13 @@ for k, vals in GENDER_ALIASES.items():
     GENDER_CANONICAL[k] = k.upper()
     for v in vals:
         GENDER_CANONICAL[v] = k.upper()
+
+# ----------------------------
+# State-meet definitions
+# ----------------------------
+STATE_MEETS_OUTDOOR = {"Division I", "Division II"}
+STATE_MEETS_INDOOR = {"Indoor State Championship"}
+STATE_MEETS_ALL = STATE_MEETS_OUTDOOR | STATE_MEETS_INDOOR
 
 
 # ----------------------------
@@ -164,6 +170,58 @@ def load_and_parse(file_bytes: bytes) -> pd.DataFrame:
 
 
 # ----------------------------
+# Athlete/title utilities
+# ----------------------------
+def normalize_name(s: str) -> str:
+    return re.sub(r"\s+", " ", s.strip().lower()) if isinstance(s, str) else ""
+
+
+@st.cache_data(show_spinner=False)
+def all_athletes_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Return distinct athletes with (gender, name, seen schools)."""
+    tmp = df.copy()
+    tmp["name_norm"] = tmp["name"].apply(normalize_name)
+    # ignore team-only (relay) names by requiring a " " in name OR any class cell
+    # (relays in the workbook typically store team names in the Name field)
+    # We'll still index everything; counts will exclude relays later.
+    schools = (
+        tmp.groupby(["gender", "name", "name_norm"])["school"]
+        .apply(lambda x: ", ".join(sorted({s for s in x.dropna()})))
+        .reset_index(name="schools")
+    )
+    return schools.sort_values(["gender", "name"]).reset_index(drop=True)
+
+
+def title_count(
+    df: pd.DataFrame,
+    athlete_name: str,
+    *,
+    include_meets: set,
+    include_relays: bool = False,  # default False: relays excluded for athlete profiles
+) -> tuple[int, pd.DataFrame]:
+    """
+    Return (count, rows) of titles for athlete_name limited to include_meets.
+    If include_relays=False, remove relay events (4x100, 4x200, 4x400, 4x800).
+    """
+    nn = normalize_name(athlete_name)
+    cur = df.copy()
+    cur["name_norm"] = cur["name"].apply(normalize_name)
+    cur = cur[cur["name_norm"] == nn]
+    cur = cur[cur["meet"].isin(include_meets)]
+    if not include_relays:
+        cur = cur[~cur["event"].isin({"4x100", "4x200", "4x400", "4x800"})]
+    return len(cur), cur.sort_values(["year", "meet", "event"])
+
+
+def guess_gender_for_name(df: pd.DataFrame, athlete_name: str) -> List[str]:
+    """Return list of genders where this name appears (often exactly one)."""
+    nn = normalize_name(athlete_name)
+    g = df.assign(name_norm=df["name"].apply(normalize_name))
+    found = g[g["name_norm"] == nn]["gender"].dropna().unique().tolist()
+    return found or ["GIRLS", "BOYS"]  # fallback
+
+
+# ----------------------------
 # Natural-language parsing
 # ----------------------------
 def canonical_meet(token: str) -> Optional[str]:
@@ -201,8 +259,27 @@ def canonical_event(event_text: str, gender: Optional[str]) -> Optional[str]:
 
 
 def parse_question(q: str) -> Dict[str, Optional[str]]:
-    out = {"gender": None, "event": None, "meet": None, "year": None, "name": None, "school": None}
+    """
+    Extract filters + 'intent' for title counting.
+    Fields: gender, event, meet, year, name, school, intent, scope
+    scope ∈ {None, 'state', 'indoor', 'outdoor'}
+    """
+    out = {
+        "gender": None, "event": None, "meet": None, "year": None,
+        "name": None, "school": None, "intent": None, "scope": None
+    }
     t = q.strip()
+    low = t.lower()
+
+    # intent: counting titles/state championships
+    if re.search(r"\bhow many\b.*\b(championships?|titles?)\b", low):
+        out["intent"] = "count_titles"
+        if "state" in low:
+            out["scope"] = "state"
+        if "indoor" in low:
+            out["scope"] = "indoor"
+        if "outdoor" in low:
+            out["scope"] = "outdoor"
 
     # year
     y = re.findall(r"(20\d{2})", t)
@@ -212,22 +289,21 @@ def parse_question(q: str) -> Dict[str, Optional[str]]:
     # gender
     gmatch = None
     for tok in re.findall(r"[A-Za-z]+", t):
-        low = tok.lower()
-        if low in GENDER_CANONICAL:
-            gmatch = GENDER_CANONICAL[low]
+        low_tok = tok.lower()
+        if low_tok in GENDER_CANONICAL:
+            gmatch = GENDER_CANONICAL[low_tok]
             break
     out["gender"] = gmatch
 
     # meet (search phrases)
-    lowered = t.lower()
     for phrase in sorted(MEET_CANONICAL.keys(), key=len, reverse=True):
-        if phrase in lowered:
+        if phrase in low:
             out["meet"] = MEET_CANONICAL[phrase]
             break
 
     # event
     for ev_phrase in sorted(EVENT_CANONICAL.keys(), key=len, reverse=True):
-        if ev_phrase in lowered:
+        if ev_phrase in low:
             out["event"] = EVENT_CANONICAL[ev_phrase]
             break
     if not out["event"]:
@@ -240,34 +316,12 @@ def parse_question(q: str) -> Dict[str, Optional[str]]:
     if m:
         out["name"] = m.group(1).strip()
     else:
-        m2 = re.search(r"(?:by|from|at)\s+([A-Z][A-Za-z\-']+(?:\s+[A-Z][A-Za-z\-']+)*)", q)
+        # pick up phrases like: has <Name>, did <Name>, for <Name>, by <Name>, from <Name>, at <Name>
+        m2 = re.search(r"(?:has|did|for|by|from|at)\s+([A-Z][A-Za-z\-']+(?:\s+[A-Z][A-Za-z\-']+)*)", q)
         if m2:
             out["name"] = m2.group(1).strip()
 
     return out
-
-
-def apply_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
-    cur = df
-    if f.get("gender"):
-        cur = cur[cur["gender"] == f["gender"]]
-    if f.get("event"):
-        ev = f["event"]
-        if ev in {"100/55H", "110/55H"} and f.get("gender") is None:
-            cur = cur[cur["event"].isin(["100/55H", "110/55H"])]
-        else:
-            cur = cur[cur["event"] == ev]
-    if f.get("meet"):
-        cur = cur[cur["meet"] == f["meet"]]
-    if f.get("year"):
-        cur = cur[cur["year"] == f["year"]]
-    if f.get("name"):
-        needle = f["name"].lower()
-        cur = cur[
-            cur["name"].str.lower().str.contains(needle, na=False)
-            | cur["school"].str.lower().str.contains(needle, na=False)
-        ]
-    return cur.sort_values(["gender", "event", "meet", "year"])
 
 
 # ----------------------------
@@ -303,11 +357,14 @@ with st.sidebar:
             df = None
 # ---------------------------------------------------------------------------
 
-tab1, tab2, tab3 = st.tabs(["🔎 Ask a question", "🎛️ Explore", "🛠️ Data status"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔎 Ask a question", "🎛️ Explore", "👤 Athlete profiles", "🛠️ Data status"])
 
+# ----------------------------
+# Q&A
+# ----------------------------
 with tab1:
     st.subheader("Natural-language Q&A")
-    st.caption("Examples: “Who won the girls 200 at Indoor in 2026?”, “Show Juliana Balon indoor titles”, “Boys long jump MOC 2024”.")
+    st.caption("Examples: “Who won the girls 200 at Indoor in 2026?”, “How many state championships has Juliana Balon won?”, “Boys long jump MOC 2024”.")
     q = st.text_input("Type your question")
     if q and df is not None:
         filters = parse_question(q)
@@ -316,12 +373,87 @@ with tab1:
         if (filters.get("event") in {"100/55", "100/55H", "110/55H"}) and not filters.get("meet"):
             filters["meet"] = "Indoor State Championship"
 
-        result = apply_filters(df, filters)
+        # ---- NEW: handle "count_titles" intent --------------------------------
+        if filters.get("intent") == "count_titles" and filters.get("name"):
+            # Determine scope & meets
+            scope = filters.get("scope")  # 'state'|'indoor'|'outdoor'|None
+            if scope == "indoor":
+                include_meets = STATE_MEETS_INDOOR
+                scope_label = "Indoor state championships"
+            elif scope == "outdoor":
+                include_meets = STATE_MEETS_OUTDOOR
+                scope_label = "Outdoor state championships"
+            else:
+                # if the word "state" appears anywhere, default to true state meets
+                include_meets = STATE_MEETS_ALL if ("state" in (filters.get("scope") or "") or "state" in q.lower()) else set(df["meet"].unique())
+                scope_label = "State championships" if include_meets == STATE_MEETS_ALL else "Championships (all meets)"
+
+            # Optionally apply gender if provided
+            df_scope = df if not filters.get("gender") else df[df["gender"] == filters["gender"]]
+
+            # Count titles (relays excluded for athlete-focused counts)
+            total_count, rows = title_count(df_scope, filters["name"], include_meets=include_meets, include_relays=False)
+
+            # If none found and gender unknown, try both genders
+            if total_count == 0 and not filters.get("gender"):
+                genders = guess_gender_for_name(df, filters["name"])
+                collected = []
+                for g in genders:
+                    c, rws = title_count(df[df["gender"] == g], filters["name"], include_meets=include_meets, include_relays=False)
+                    if c:
+                        collected.append((g, c, rws))
+                if collected:
+                    st.subheader(f"{filters['name']} — {scope_label}")
+                    for (g, c, rws) in collected:
+                        st.metric(f"{g.title()} titles", c)
+                        st.dataframe(rws[["gender", "year", "meet", "event", "name", "class", "school", "mark"]],
+                                     use_container_width=True)
+                    st.stop()
+
+            # Single-gender or combined found
+            st.subheader(f"{filters['name']} — {scope_label}")
+            st.metric("Titles", total_count)
+            if total_count > 0:
+                colA, colB, colC = st.columns(3)
+                with colA:
+                    st.caption("By meet")
+                    st.dataframe(rows.groupby("meet").size().reset_index(name="titles"))
+                with colB:
+                    st.caption("By event")
+                    st.dataframe(rows.groupby("event").size().reset_index(name="titles"))
+                with colC:
+                    st.caption("By year")
+                    st.dataframe(rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
+
+                st.caption("All title rows (relays excluded)")
+                st.dataframe(rows[["gender", "year", "meet", "event", "class", "school", "mark"]],
+                             use_container_width=True)
+            st.stop()
+        # -----------------------------------------------------------------------
+
+        # Existing behavior for non-count queries
+        result = (
+            df if filters is None else
+            df[
+                ((df["gender"] == filters.get("gender")) | (filters.get("gender") is None))
+                & ((df["event"] == filters.get("event")) | (filters.get("event") is None))
+                & ((df["meet"] == filters.get("meet")) | (filters.get("meet") is None))
+                & ((df["year"] == filters.get("year")) | (filters.get("year") is None))
+            ]
+        )
+        # Name/school contains filter (if provided)
+        if filters.get("name"):
+            needle = filters["name"].lower()
+            result = result[
+                result["name"].str.lower().str.contains(needle, na=False) |
+                result["school"].str.lower().str.contains(needle, na=False)
+            ]
         if result.empty:
             st.error("No matches found. Try adding gender, meet, or year.")
             with st.expander("Detected filters"):
                 st.json(filters)
         else:
+            # If the query resolves to a single champion, present as a card
             if (filters.get("year") and filters.get("meet") and filters.get("event") and result.shape[0] == 1):
                 row = result.iloc[0]
                 st.success(
@@ -335,6 +467,9 @@ with tab1:
                 use_container_width=True,
             )
 
+# ----------------------------
+# Explore
+# ----------------------------
 with tab2:
     st.subheader("Filter champions")
     if df is None:
@@ -368,15 +503,98 @@ with tab2:
             use_container_width=True
         )
 
+# ----------------------------
+# Athlete Profiles (relays excluded)
+# ----------------------------
 with tab3:
+    st.subheader("Athlete profiles (relays excluded)")
+    if df is None:
+        st.info("No data loaded.")
+    else:
+        idx = all_athletes_index(df)
+        # Athlete picker
+        athlete = st.selectbox(
+            "Choose athlete",
+            options=["(type to search)"] + idx["name"].unique().tolist(),
+            index=0,
+            help="Start typing a name to filter the list.",
+        )
+
+        # Scope selector (no relay toggle; relays excluded by design)
+        scope = st.radio(
+            "Scope",
+            options=["State (Indoor + Division I/II)", "Indoor only", "Outdoor only", "All meets"],
+            horizontal=True,
+        )
+
+        if athlete and athlete != "(type to search)":
+            if scope == "Indoor only":
+                include_meets = STATE_MEETS_INDOOR
+                scope_label = "Indoor State Championship"
+            elif scope == "Outdoor only":
+                include_meets = STATE_MEETS_OUTDOOR
+                scope_label = "Outdoor (Division I & II)"
+            elif scope == "All meets":
+                include_meets = set(df["meet"].unique())
+                scope_label = "All meets"
+            else:
+                include_meets = STATE_MEETS_ALL
+                scope_label = "State (Indoor + Division I/II)"
+
+            genders = guess_gender_for_name(df, athlete)
+            collected = []
+            for g in genders:
+                count, rows = title_count(
+                    df[df["gender"] == g],
+                    athlete,
+                    include_meets=include_meets,
+                    include_relays=False,  # relays excluded for athlete profiles
+                )
+                collected.append((g, count, rows))
+
+            st.markdown(f"### {athlete} — {scope_label}")
+            cols = st.columns(len(collected) if collected else 1)
+            for i, (g, count, rows) in enumerate(collected or []):
+                cols[i].metric(f"{g.title()} titles", int(count))
+
+            # Combined table & breakdowns
+            any_titles = any(c for _, c, _ in collected)
+            if any_titles:
+                all_rows = pd.concat([r for _, c, r in collected if c > 0], ignore_index=True)
+                if not all_rows.empty:
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.caption("By meet")
+                        st.dataframe(all_rows.groupby("meet").size().reset_index(name="titles"))
+                    with c2:
+                        st.caption("By event")
+                        st.dataframe(all_rows.groupby("event").size().reset_index(name="titles"))
+                    with c3:
+                        st.caption("By year")
+                        st.dataframe(all_rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
+                    st.caption("Title rows (relays excluded)")
+                    st.dataframe(
+                        all_rows[["gender", "year", "meet", "event", "class", "school", "mark"]],
+                        use_container_width=True
+                    )
+            else:
+                st.info("No titles found for the selected scope.")
+
+# ----------------------------
+# Data Status
+# ----------------------------
+with tab4:
     st.subheader("Data status / debug")
     if df is None:
         st.info("No data loaded.")
     else:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total rows", f"{len(df):,}")
-        c2.metric("Min year", int(df["year"].min()))
-        c3.metric("Max year", int(df["year"].max()))
+        try:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total rows", f"{len(df):,}")
+            c2.metric("Min year", int(df["year"].min()))
+            c3.metric("Max year", int(df["year"].max()))
+        except Exception:
+            st.metric("Total rows", f"{len(df):,}")
         st.write("Meets:", sorted(df["meet"].unique()))
         st.write("Events (sample):", sorted(df["event"].unique())[:16])
         st.write("Example rows:")
