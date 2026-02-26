@@ -15,12 +15,15 @@
 #       default meets → Division I, Division II, Indoor State Championship
 #   • MVPs tab + Data Status tab
 #   • Quick example chips + deep-linking (?q=)
-#   • FIXES (this version):
+#   • FIXES/ADDITIONS (this version):
 #       - Meet canonicalization during parsing
 #       - Leaderboard intent detects both “most … won” and “won … most”
 #       - Robust “Who was the last … to win …” and “When was the last time … won …”
 #       - Accurate event selection for phrases like "long jump or triple jump" (no HJ bleed-through)
 #       - Uniform table rendering (hide index; Girls/Boys; Gender first)
+#       - SAME-MEET SWEEP detection when multiple events + "last"/"to win"
+#       - "Clear question" button
+#       - Highlight parsed entities above results
 
 import io
 import re
@@ -190,7 +193,7 @@ def parse_champions_sheet(ws, gender: str) -> pd.DataFrame:
 
         meet_raw = ws.cell(row=r, column=5).value
         if current_event and isinstance(meet_raw, str):
-            # FIX: canonicalize meet names (accept synonyms, pluralization, etc.)
+            # Canonicalize meet names (accept synonyms, pluralization, etc.)
             meet_name = canonical_meet(meet_raw)
             if not meet_name:
                 continue
@@ -455,8 +458,7 @@ def _extract_events_anywhere(q: str) -> set:
     # long phrases for field events
     for phrase in ["long jump","triple jump","high jump","pole vault","shot put","discus"]:
         if phrase in low: events.add(EVENT_CANONICAL[phrase])
-    # IMPORTANT: do NOT add group synonyms indiscriminately (avoids HJ leakage from "long jump")
-    # Instead, expand only phrase-level tokens (e.g., "long jump", "triple jump", "sprints")
+    # IMPORTANT: avoid global group synonym injection (prevents HJ leakage from "long jump")
     events |= _expand_event_groups(_tokenize_phrases(q))
     return events
 
@@ -485,7 +487,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         elif "outdoor" in low:       out["scope"] = "outdoor"
         elif "cross country" in low: out["scope"] = "cross country"
 
-    # Leaderboard — detect both orders: "most ... won" OR "won ... most" (FIX)
+    # Leaderboard — detect both orders: "most ... won" OR "won ... most"
     if (re.search(r"\b(most|record)\b.*\b(win|wins|won|titles?|races?)\b", low) or
         re.search(r"\b(win|wins|won|titles?|races?)\b.*\b(most|record)\b", low) or
         re.search(r"\btop\s+\d+\b", low)):
@@ -495,7 +497,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     if re.search(r"\bwhen was the last time\b.*\bwon\b", low) or re.search(r"\bmost recent\b.*\bwin\b", low):
         out["intent"] = "last_win_time"
 
-    # NEW: "Who was the last ... to win ..." (covers your 55H/55/200 prompt)
+    # "Who was the last ... to win ..." (covers more phrases)
     if re.search(r"\bwho was the last\b.*\bto win\b", low):
         out["intent"] = "last_win_time"
     # ---------------------------------
@@ -549,9 +551,14 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     out["schools"]  = list(dict.fromkeys(out["schools"]))
     out["athletes"] = list(dict.fromkeys(out["athletes"]))
 
-    # UPGRADE to sweep if MULTIPLE events are present (no need to require "single/same")
-    if out["intent"] in ("last_win_time", "last_sweep") and len(out["events"]) >= 2:
-        out["intent"] = "last_sweep"
+    # SAME-MEET SWEEP detection:
+    # If there are TWO+ events and the question is about "last"/"most recent"
+    # or uses "who was the last ... to win", treat as same-meet sweep.
+    if len(out["events"]) >= 2:
+        if (out["intent"] in ("last_win_time", "last_sweep")) or \
+           re.search(r"\b(last|most recent)\b", low) or \
+           re.search(r"\bto win\b", low):
+            out["intent"] = "last_sweep"
 
     return out
 
@@ -687,7 +694,7 @@ with tab1:
         "How many state championships has Juliana Balon won?",
         "Who has won the most Division I races?",
         "Girls long jump or triple jump state champions at Padua since 2018",
-        # Also include the hard cases as examples:
+        # Hard cases:
         "Who has won the boys 200 the most at the indoor state championships?",
         "Who has won the boys 400 the most at the Meet of Champions?",
         "When was the last time a Middletown runner won the Meet of Champions 400?",
@@ -702,11 +709,57 @@ with tab1:
             _set_q_in_url(ex)
             st.rerun()
 
-    # ---- Standard Question Bar ----
+    # ---- Standard Question Bar + Clear button (NEW) ----
+    c_q, c_btn = st.columns([0.8, 0.2])
     prefill = st.session_state.get("q_prefill", "")
-    q = st.text_input("Type your question", value=prefill)
+    q = c_q.text_input("Type your question", value=prefill)
+    def _clear_q():
+        st.session_state["q_prefill"] = ""
+        try:
+            st.query_params.clear()
+        except Exception:
+            try:
+                st.experimental_set_query_params()
+            except Exception:
+                pass
+        st.rerun()
+    if c_btn.button("Clear question"):
+        _clear_q()
     if q:
         _set_q_in_url(q)
+
+    # ---- "What I understood" helper (NEW) ----
+    def _render_understood(fm: Dict[str, Optional[str]]):
+        parts = []
+        if fm.get("genders"):
+            parts.append("**Gender:** " + ", ".join([g.title() for g in fm["genders"]]))
+        if fm.get("events"):
+            parts.append("**Events:** " + ", ".join(sorted(fm["events"])))
+        if fm.get("meets"):
+            parts.append("**Meets:** " + ", ".join(fm["meets"]))
+        if fm.get("schools"):
+            parts.append("**Schools:** " + ", ".join(fm["schools"]))
+        if fm.get("athletes"):
+            parts.append("**Athletes:** " + ", ".join(fm["athletes"]))
+        yf, yt = fm.get("year_from"), fm.get("year_to")
+        if yf and yt and yf == yt:
+            parts.append(f"**Year:** {yf}")
+        elif yf and yt:
+            parts.append(f"**Years:** {yf}–{yt}")
+        elif yf and not yt:
+            parts.append(f"**Since:** {yf}")
+        intent = fm.get("intent")
+        if intent:
+            label = {
+                "leaderboard_wins": "Leaderboard",
+                "count_titles": "Title Count",
+                "mvp_lookup": "MVP Lookup",
+                "last_win_time": "Last Time",
+                "last_sweep": "Last Sweep",
+            }.get(intent, intent)
+            parts.insert(0, f"**Intent:** {label}")
+        if parts:
+            st.markdown("🧠 *What I understood:* " + " — ".join(parts))
 
     if q and df is not None:
         f_multi = parse_question_multi(q)
@@ -723,6 +776,9 @@ with tab1:
                 for s in KNOWN_SCHOOLS:
                     if isinstance(s, str) and s.lower() in lowq:
                         fm["schools"].append(s)
+
+        # Show understood entities right away (NEW)
+        _render_understood(f_multi)
 
         # ---- Title-count intent ----
         if f_multi.get("intent") == "count_titles":
@@ -881,6 +937,7 @@ with tab1:
                 with st.expander("Detected filters"): st.json(f_multi)
                 st.stop()
 
+            # SAME-MEET SWEEP: same year+meet+gender+athlete must include ALL required events
             agg = (cur.groupby(["year","meet","gender","name"])["event"]
                       .apply(set)
                       .reset_index(name="events_won"))
