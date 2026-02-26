@@ -37,8 +37,8 @@ MEETS: Dict[str, set] = {
     "Henlopen Conference": {"henlopen"},
     "Indoor State Championship": {
         "indoor", "indoor state", "state indoor", "indoor championship",
-        "indoor state championship",      # singular phrasing
-        "indoor state championships"      # NEW: plural phrasing
+        "indoor state championship",      # singular
+        "indoor state championships"      # plural  (Fix #1)
     },
 }
 MEET_CANONICAL: Dict[str, str] = {}
@@ -432,11 +432,11 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         elif "outdoor" in low:       out["scope"] = "outdoor"
         elif "cross country" in low: out["scope"] = "cross country"
 
-    # NEW: leaderboard intent – include "won"
+    # Leaderboard intent — include "won"  (Fix #2)
     if re.search(r"\b(most|record)\b.*\b(win|wins|won|titles?|races?)\b", low) or re.search(r"\btop\s+\d+\b", low):
         out["intent"] = "leaderboard_wins"
 
-    # top N (default to Top‑1 if "who … most" without explicit top count)
+    # top N (default to Top‑1 if "who … most")  (Fix #2)
     m_top = re.search(r"\btop\s+(\d+)\b", low)
     if m_top:
         out["top_n"] = max(1, int(m_top.group(1)))
@@ -473,7 +473,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     # 1) quoted names
     for m in re.finditer(r"\"([^\"]+)\"", q):
         out["athletes"].append(m.group(1).strip())
-    # 2) common lead-ins: has/did/for/by/from/at <First Last ...>
+    # 2) common lead-ins: has/did/for/by/from/at <First Last ...>  (Fix #3 complements)
     m = re.search(r"\b(?:has|did|for|by|from|at)\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
     if m:
         out["athletes"].append(m.group(1).strip())
@@ -584,7 +584,7 @@ with tab1:
     if q and df is not None:
         f_multi = parse_question_multi(q)
 
-        # ---- Title-count intent (with athlete auto-detect) ----
+        # ---- Title-count intent (with athlete auto-detect)  (Fix #3) ----
         if f_multi.get("intent") == "count_titles":
             # If no athlete parsed, try to auto-detect from known athletes
             if not f_multi["athletes"]:
@@ -642,15 +642,14 @@ with tab1:
             if mvps_scope: cur = cur[cur["scope"] == mvps_scope]
             if f_multi["genders"]: cur = cur[cur["gender"].isin(f_multi["genders"])]
 
-            # School filter
+            # School filter (explicit or auto-detect from known schools)
             if f_multi["schools"]:
                 mask = False
                 for s in f_multi["schools"]:
                     needle = s.lower()
                     mask = mask | cur["school"].str.lower().str.contains(needle, na=False)
                 cur = cur[mask]
-            # Auto-detect school if none parsed
-            if not f_multi["schools"] and 'KNOWN_SCHOOLS' in globals() and globals()['KNOWN_SCHOOLS']:
+            else:
                 lowp = f_multi["raw"].lower()
                 auto = []
                 for s in KNOWN_SCHOOLS:
@@ -681,14 +680,14 @@ with tab1:
                     st.dataframe(cur.sort_values(["season_end","gender","scope"])[["season_label","gender","scope","name","school","category"]], use_container_width=True)
                 st.stop()
 
-        # ---- Leaderboard intent: "Who has won the most …" ----
+        # ---- Leaderboard intent: "Who has won the most …"  (Fix #2 & #4) ----
         if f_multi.get("intent") == "leaderboard_wins":
             lowp = f_multi["raw"].lower()
             # "state" rule
             if ("state" in lowp) and ("indoor" not in lowp) and ("outdoor" not in lowp) and not f_multi["meets"]:
                 f_multi["meets"] = list(STATE_MEETS_ALL)
             # auto-detect schools
-            if not f_multi["schools"] and 'KNOWN_SCHOOLS' in globals() and globals()['KNOWN_SCHOOLS']:
+            if not f_multi["schools"] and KNOWN_SCHOOLS:
                 lowq = f_multi["raw"].lower()
                 for s in KNOWN_SCHOOLS:
                     if isinstance(s,str) and s.lower() in lowq:
@@ -696,8 +695,8 @@ with tab1:
 
             lb = leaderboard_wins(df, f_multi)
 
+            # Top‑1: show a leader card (Fix #4)
             if f_multi.get("top_n", 10) == 1 and not lb.empty:
-                # Nice one-card answer
                 row = lb.iloc[0]
                 bits = []
                 if f_multi["genders"]: bits.append("/".join([g.title() for g in f_multi["genders"]]))
@@ -727,7 +726,7 @@ with tab1:
             f_multi["meets"] = list(STATE_MEETS_ALL)
         if ({"100/55","100/55H","110/55H"} & f_multi["events"]) and not f_multi["meets"]:
             f_multi["meets"] = list(STATE_MEETS_INDOOR)
-        if not f_multi["schools"] and 'KNOWN_SCHOOLS' in globals() and globals()['KNOWN_SCHOOLS']:
+        if not f_multi["schools"] and KNOWN_SCHOOLS:
             lowp = f_multi["raw"].lower()
             for s in KNOWN_SCHOOLS:
                 if isinstance(s,str) and s.lower() in lowp:
