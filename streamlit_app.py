@@ -14,8 +14,7 @@
 #   • "State" rule: if prompt contains 'state' but NOT 'indoor'/'outdoor',
 #       default meets → Division I, Division II, Indoor State Championship
 #   • MVPs tab + Data Status tab
-#   • NEW: Query Builder → “Generate question”, updated event groupings,
-#          example prompt chips, deep-linking (?q=)
+#   • Quick example chips under the question bar + deep-linking (?q=)
 
 import io
 import re
@@ -40,7 +39,7 @@ MEETS: Dict[str, set] = {
     "Indoor State Championship": {
         "indoor", "indoor state", "state indoor", "indoor championship",
         "indoor state championship",      # singular
-        "indoor state championships"      # plural  (Fix #1)
+        "indoor state championships"      # plural
     },
 }
 MEET_CANONICAL: Dict[str, str] = {}
@@ -86,7 +85,7 @@ for canonical, synonyms in GENDER_ALIASES.items():
     for s in synonyms:
         GENDER_CANONICAL[s] = canonical.upper()
 
-# ---------- Event groups (UPDATED per your requested definitions) ----------
+# ---------- Event groups (UPDATED per requested definitions) ----------
 # Distance: 800, 1600, 3200
 # Sprints: 100/55, 110/55H, 200, 400, 300H
 # Hurdles: 110/55H, 300H
@@ -450,11 +449,11 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         elif "outdoor" in low:       out["scope"] = "outdoor"
         elif "cross country" in low: out["scope"] = "cross country"
 
-    # Leaderboard intent — include "won"  (Fix #2)
+    # Leaderboard intent — include "won"
     if re.search(r"\b(most|record)\b.*\b(win|wins|won|titles?|races?)\b", low) or re.search(r"\btop\s+\d+\b", low):
         out["intent"] = "leaderboard_wins"
 
-    # top N (default to Top‑1 if "who … most")  (Fix #2)
+    # top N (default to Top‑1 if "who … most")
     m_top = re.search(r"\btop\s+(\d+)\b", low)
     if m_top:
         out["top_n"] = max(1, int(m_top.group(1)))
@@ -599,16 +598,14 @@ with tab1:
         "“List Padua sprint winners 2022–2026 at Indoor”."
     )
 
-    # ---- Optional nicety: Deep-linking (?q=) with safe fallback ----
+    # ---- Deep-linking (?q=) with safe fallback ----
     def _get_q_from_url():
         try:
-            # Preferred modern API
             params = st.query_params
             if "q" in params:
                 val = params["q"]
                 return val[0] if isinstance(val, list) else val
         except Exception:
-            # Fallback to experimental API
             try:
                 params = st.experimental_get_query_params()
                 if "q" in params:
@@ -627,109 +624,13 @@ with tab1:
             except Exception:
                 pass
 
-    # Prime session state from URL if empty
+    # Prime from URL if no prefill yet
     if "q_prefill" not in st.session_state or not st.session_state["q_prefill"]:
         url_q = _get_q_from_url()
         if url_q:
             st.session_state["q_prefill"] = url_q
 
-    # ---- Query Builder (Generate question) ----
-    with st.expander("Build a question"):
-        # Pick genders
-        gb_genders = st.multiselect(
-            "Genders",
-            options=["GIRLS", "BOYS"],
-            help="Select one or both"
-        )
-
-        # Pick event groups
-        gb_event_groups = st.multiselect(
-            "Event groups (optional)",
-            options=sorted(EVENT_GROUPS.keys()),
-            help="Choosing a group will include all events in that group"
-        )
-
-        # Derive events from groups
-        events_from_groups = set()
-        for grp in gb_event_groups:
-            events_from_groups |= EVENT_GROUPS.get(grp, set())
-
-        # Also allow explicit events (canonical names)
-        gb_events = st.multiselect(
-            "Specific events (optional)",
-            options=sorted(set(EVENT_CANONICAL.values())),
-            help="Add or refine with specific events"
-        )
-
-        # Meets
-        gb_meets = st.multiselect(
-            "Meets (optional)",
-            options=sorted(set(MEET_CANONICAL.values())),
-            help="Leave empty to use 'state' defaults if you include the word 'state' in your question"
-        )
-
-        # School
-        gb_school = st.text_input("School contains (optional)")
-
-        # Year range
-        c1, c2 = st.columns(2)
-        gb_year_from = c1.number_input("From year (optional)", min_value=2000, max_value=2100, value=0, step=1)
-        gb_year_to   = c2.number_input("To year (optional)",   min_value=2000, max_value=2100, value=0, step=1)
-
-        # Prompt archetype selector
-        archetype = st.selectbox(
-            "Question type",
-            options=[
-                "Who has won the most ...",
-                "List all champions ...",
-                "How many state championships has {athlete} won?"
-            ],
-            help="Choose a framing for your question"
-        )
-
-        if st.button("Generate question"):
-            parts = []
-
-            # Genders
-            if gb_genders:
-                parts.append(" ".join(g.lower() for g in gb_genders))
-
-            # Events (groups + explicit)
-            combined_events = sorted(set(events_from_groups) | set(gb_events))
-            if combined_events:
-                parts.append(", ".join(combined_events))
-
-            # Meets
-            if gb_meets:
-                parts.append(" at " + ", ".join(gb_meets))
-
-            # School
-            if gb_school.strip():
-                parts.append(f" from {gb_school.strip()}")
-
-            # Year range
-            if gb_year_from and gb_year_to and gb_year_from <= gb_year_to:
-                parts.append(f" between {gb_year_from} and {gb_year_to}")
-            elif gb_year_from and not gb_year_to:
-                parts.append(f" since {gb_year_from}")
-
-            # Build question by archetype
-            if archetype.startswith("Who has won the most"):
-                q_text = "Who has won the most " + " ".join(parts).strip()
-            elif archetype.startswith("List all champions"):
-                q_text = "List " + " ".join(parts).strip() + " champions"
-            else:
-                # Title count archetype placeholder (user should edit {athlete})
-                q_text = "How many state championships has {athlete} won?"
-                # Meets left implicit so 'state' rule can apply
-
-            # Stash and prefill; also update URL
-            st.session_state["q_prefill"] = q_text
-            _set_q_in_url(q_text)
-            st.rerun()
-    # ---- End Query Builder ----
-
-    # ---- Optional nicety: Example prompt chips ----
+    # ---- QUICK EXAMPLE CHIPS ----
     example_prompts = [
         "Who won the girls 200 at Indoor in 2026?",
         "How many state championships has Juliana Balon won?",
@@ -744,7 +645,7 @@ with tab1:
             _set_q_in_url(ex)
             st.rerun()
 
-    # Q input honoring prefill and syncing to URL
+    # ---- Standard Question Bar ----
     prefill = st.session_state.get("q_prefill", "")
     q = st.text_input("Type your question", value=prefill)
     if q:
@@ -753,7 +654,7 @@ with tab1:
     if q and df is not None:
         f_multi = parse_question_multi(q)
 
-        # ---- Title-count intent (with athlete auto-detect)  (Fix #3) ----
+        # ---- Title-count intent (with athlete auto-detect) ----
         if f_multi.get("intent") == "count_titles":
             # If no athlete parsed, try to auto-detect from known athletes
             if not f_multi["athletes"]:
@@ -849,7 +750,7 @@ with tab1:
                     st.dataframe(cur.sort_values(["season_end","gender","scope"])[["season_label","gender","scope","name","school","category"]], use_container_width=True)
                 st.stop()
 
-        # ---- Leaderboard intent: "Who has won the most …"  (Fix #2 & #4) ----
+        # ---- Leaderboard intent: "Who has won the most …" ----
         if f_multi.get("intent") == "leaderboard_wins":
             lowp = f_multi["raw"].lower()
             # "state" rule
@@ -864,7 +765,7 @@ with tab1:
 
             lb = leaderboard_wins(df, f_multi)
 
-            # Top‑1: show a leader card (Fix #4)
+            # Top‑1: show a leader card
             if f_multi.get("top_n", 10) == 1 and not lb.empty:
                 row = lb.iloc[0]
                 bits = []
