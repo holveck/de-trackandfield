@@ -10,8 +10,8 @@
 #   • Athlete Profiles (relays excluded)
 #   • MVPs parsing + Q&A (school to the right; co‑MVPs in same season block)
 #   • Multi-condition queries (events/meets/schools/athletes/genders + year ranges)
-#   • Leaderboards: “Who has won the most …”
-#   • “State” rule: if prompt contains 'state' but NOT 'indoor'/'outdoor',
+#   • Leaderboards: "Who has won the most …" (supports 'won', defaults to Top‑1 on "who … most")
+#   • "State" rule: if prompt contains 'state' but NOT 'indoor'/'outdoor',
 #       default meets → Division I, Division II, Indoor State Championship
 #   • MVPs tab + Data Status tab
 
@@ -37,8 +37,8 @@ MEETS: Dict[str, set] = {
     "Henlopen Conference": {"henlopen"},
     "Indoor State Championship": {
         "indoor", "indoor state", "state indoor", "indoor championship",
-        "indoor state championship",             # singular (already implied by key)
-        "indoor state championships"             # NEW: plural
+        "indoor state championship",      # singular phrasing
+        "indoor state championships"      # NEW: plural phrasing
     },
 }
 MEET_CANONICAL: Dict[str, str] = {}
@@ -102,7 +102,7 @@ EVENT_GROUP_SYNONYMS = {
     "relay": "relays", "relays": "relays", "4x": "relays",
 }
 
-# Track vs field partition (for “races” leaderboard)
+# Track vs field (for "races" leaderboard)
 TRACK_EVENTS = {"100/55","200","400","800","1600","3200","100/55H","110/55H","300H","4x100","4x200","4x400","4x800"}
 FIELD_EVENTS = {"LJ","TJ","HJ","PV","Shot put","Discus"}
 
@@ -190,7 +190,7 @@ def load_champions(file_bytes: bytes) -> pd.DataFrame:
     return out
 
 # ----------------------------
-# MVPs parsing (school to right; co‑MVPs)
+# MVPs parsing (school to right; co‑MVPs within a season block)
 # ----------------------------
 MVP_CATEGORY_MAP = {
     "Girls Indoor Track and Field": ("GIRLS", "Indoor"),
@@ -419,7 +419,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     }
     low = q.lower()
 
-   # intents
+    # intents --------------------------
     if re.search(r"\bhow many\b.*\b(championships?|titles?)\b", low):
         out["intent"] = "count_titles"
         if "state" in low:   out["scope"] = "state"
@@ -432,23 +432,21 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         elif "outdoor" in low:       out["scope"] = "outdoor"
         elif "cross country" in low: out["scope"] = "cross country"
 
-    # NEW: leaderboard intent – also recognize "won"
+    # NEW: leaderboard intent – include "won"
     if re.search(r"\b(most|record)\b.*\b(win|wins|won|titles?|races?)\b", low) or re.search(r"\btop\s+\d+\b", low):
         out["intent"] = "leaderboard_wins"
 
-    # keep 'top N' capture
+    # top N (default to Top‑1 if "who … most" without explicit top count)
     m_top = re.search(r"\btop\s+(\d+)\b", low)
     if m_top:
         out["top_n"] = max(1, int(m_top.group(1)))
-
-    # NEW: if it's a "who ... most" type question without explicit top N, default to Top-1
     if out["intent"] == "leaderboard_wins" and not m_top and re.search(r"\bwho\b", low) and re.search(r"\bmost\b", low):
         out["top_n"] = 1
 
-    # If they mention "races", constrain to track events
     if "race" in low or "races" in low:
         out["track_only"] = True
-        
+    # ---------------------------------
+
     # year range
     yf, yt = _extract_year_range(q)
     out["year_from"], out["year_to"] = yf, yt
@@ -479,7 +477,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     m = re.search(r"\b(?:has|did|for|by|from|at)\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
     if m:
         out["athletes"].append(m.group(1).strip())
-    # 3) fallback 'by <Name>' (kept)
+    # 3) fallback 'by <Name>'
     m = re.search(r"\bby\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
     if m:
         out["athletes"].append(m.group(1).strip())
@@ -514,7 +512,6 @@ def apply_multi_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.Dat
         cur = cur[(cur["year"] >= yf) & (cur["year"] <= yt)]
     elif yf and not yt:
         cur = cur[cur["year"] >= yf]
-    # “races” → track only
     if f.get("track_only"):
         cur = cur[cur["event"].isin(TRACK_EVENTS)]
     return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
@@ -580,6 +577,7 @@ with tab1:
         "“List every cross country state MVP from Tatnall”, "
         "“Who has won the most Division I races?”, "
         "“Girls long jump or triple jump state champions at Padua since 2018”, "
+        "“Who has won the boys 200 the most at the indoor state championships?”, "
         "“List Padua sprint winners 2022–2026 at Indoor”."
     )
     q = st.text_input("Type your question")
@@ -652,7 +650,7 @@ with tab1:
                     mask = mask | cur["school"].str.lower().str.contains(needle, na=False)
                 cur = cur[mask]
             # Auto-detect school if none parsed
-            if not f_multi["schools"] and KNOWN_SCHOOLS:
+            if not f_multi["schools"] and 'KNOWN_SCHOOLS' in globals() and globals()['KNOWN_SCHOOLS']:
                 lowp = f_multi["raw"].lower()
                 auto = []
                 for s in KNOWN_SCHOOLS:
@@ -685,33 +683,51 @@ with tab1:
 
         # ---- Leaderboard intent: "Who has won the most …" ----
         if f_multi.get("intent") == "leaderboard_wins":
-            ...
+            lowp = f_multi["raw"].lower()
+            # "state" rule
+            if ("state" in lowp) and ("indoor" not in lowp) and ("outdoor" not in lowp) and not f_multi["meets"]:
+                f_multi["meets"] = list(STATE_MEETS_ALL)
+            # auto-detect schools
+            if not f_multi["schools"] and 'KNOWN_SCHOOLS' in globals() and globals()['KNOWN_SCHOOLS']:
+                lowq = f_multi["raw"].lower()
+                for s in KNOWN_SCHOOLS:
+                    if isinstance(s,str) and s.lower() in lowq:
+                        f_multi["schools"].append(s)
+
             lb = leaderboard_wins(df, f_multi)
 
-            # NEW: if Top-1, show a simple result card
             if f_multi.get("top_n", 10) == 1 and not lb.empty:
+                # Nice one-card answer
                 row = lb.iloc[0]
-                title_bits = []
-                if f_multi["genders"]:
-                    title_bits.append("/".join([g.title() for g in f_multi["genders"]]))
-                if f_multi["events"]:
-                    title_bits.append(", ".join(sorted(f_multi["events"])))
-                if f_multi["meets"]:
-                    title_bits.append(", ".join(f_multi["meets"]))
-                title_text = " — ".join([b for b in title_bits if b])
-
+                bits = []
+                if f_multi["genders"]: bits.append("/".join([g.title() for g in f_multi["genders"]]))
+                if f_multi["events"]:  bits.append(", ".join(sorted(f_multi["events"])))
+                if f_multi["meets"]:   bits.append(", ".join(f_multi["meets"]))
+                title_text = " — ".join([b for b in bits if b])
                 st.success(
                     f"**Most wins {('— ' + title_text) if title_text else ''}**\n\n"
                     f"🏆 **{row['name']}** — {row['school']} — *{row['gender'].title()}* — **{int(row['wins'])} wins**"
                 )
                 st.stop()
+
+            if lb.empty:
+                st.error("No matching winners found for your leaderboard filters.")
+                with st.expander("Detected filters"): st.json(f_multi)
+            else:
+                title = "Top winners"
+                if f_multi["meets"]:   title += f" — {', '.join(f_multi['meets'])}"
+                if f_multi["events"]:  title += f" | Events: {', '.join(sorted(f_multi['events']))}"
+                st.subheader(title)
+                st.dataframe(lb.reset_index(drop=True), use_container_width=True)
+            st.stop()
+
         # ---- Champions multi-condition fallback ----
         low = f_multi["raw"].lower()
         if ("state" in low) and ("indoor" not in low) and ("outdoor" not in low) and not f_multi["meets"]:
             f_multi["meets"] = list(STATE_MEETS_ALL)
         if ({"100/55","100/55H","110/55H"} & f_multi["events"]) and not f_multi["meets"]:
             f_multi["meets"] = list(STATE_MEETS_INDOOR)
-        if not f_multi["schools"] and KNOWN_SCHOOLS:
+        if not f_multi["schools"] and 'KNOWN_SCHOOLS' in globals() and globals()['KNOWN_SCHOOLS']:
             lowp = f_multi["raw"].lower()
             for s in KNOWN_SCHOOLS:
                 if isinstance(s,str) and s.lower() in lowp:
