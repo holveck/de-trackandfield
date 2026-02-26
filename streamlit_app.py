@@ -84,25 +84,55 @@ for canonical, synonyms in GENDER_ALIASES.items():
     for s in synonyms:
         GENDER_CANONICAL[s] = canonical.upper()
 
-# ---------- Event groups ----------
+# ---------- Event groups (updated per requested definitions) ----------
 EVENT_GROUPS = {
-    "sprints": {"100/55", "200", "400"},
+    #  Distance: 800, 1600, 3200
     "distance": {"800", "1600", "3200"},
-    "hurdles": {"100/55H", "110/55H", "300H"},
-    "jumps": {"LJ", "TJ", "HJ", "PV"},
+
+    #  Sprints: 100/55, 110/55H, 200, 400, 300H
+    #  (Includes hurdles per your definition)
+    "sprints": {"100/55", "110/55H", "200", "400", "300H"},
+
+    #  Hurdles: 110/55H, 300H
+    "hurdles": {"110/55H", "300H"},
+
+    #  Field: HJ, LJ, TJ, Shot put, Discus, PV
+    "field": {"HJ", "LJ", "TJ", "Shot put", "Discus", "PV"},
+
+    #  Jumps: HJ, LJ, TJ
+    "jumps": {"HJ", "LJ", "TJ"},
+
+    #  Throws: Shot put, Discus
     "throws": {"Shot put", "Discus"},
+
+    #  Relays unchanged (kept for other parts of the app)
     "relays": {"4x100", "4x200", "4x400", "4x800"},
 }
+
 EVENT_GROUP_SYNONYMS = {
+    # sprints
     "sprint": "sprints", "sprinters": "sprints", "sprints": "sprints",
-    "distance": "distance", "distances": "distance",
+
+    # distance
+    "distance": "distance", "distances": "distance", "distance events": "distance",
+
+    # hurdles
     "hurdle": "hurdles", "hurdles": "hurdles", "hurdling": "hurdles",
+
+    # field (all field events)
+    "field": "field", "field events": "field",
+
+    # jumps (subset of field)
     "jump": "jumps", "jumps": "jumps", "field jumps": "jumps",
+
+    # throws (subset of field)
     "throw": "throws", "throws": "throws",
+
+    # relays
     "relay": "relays", "relays": "relays", "4x": "relays",
 }
 
-# Track vs field (for "races" leaderboard)
+# Track vs field (for "races" leaderboard / filters)
 TRACK_EVENTS = {"100/55","200","400","800","1600","3200","100/55H","110/55H","300H","4x100","4x200","4x400","4x800"}
 FIELD_EVENTS = {"LJ","TJ","HJ","PV","Shot put","Discus"}
 
@@ -580,7 +610,102 @@ with tab1:
         "“Who has won the boys 200 the most at the indoor state championships?”, "
         "“List Padua sprint winners 2022–2026 at Indoor”."
     )
-    q = st.text_input("Type your question")
+    # ---- Query Builder (Generate prompt) ----
+with st.expander("Build a question"):
+    # Pick genders
+    gb_genders = st.multiselect(
+        "Genders",
+        options=["GIRLS", "BOYS"],
+        help="Select one or both"
+    )
+
+    # Pick events or event groups (we show groups first for convenience)
+    gb_event_groups = st.multiselect(
+        "Event groups (optional)",
+        options=sorted(EVENT_GROUPS.keys()),
+        help="Choosing a group will include all events in that group"
+    )
+
+    # Derive concrete events from selected groups
+    events_from_groups = set()
+    for grp in gb_event_groups:
+        events_from_groups |= EVENT_GROUPS.get(grp, set())
+
+    # Also allow explicit events (canonical names) in addition to groups
+    gb_events = st.multiselect(
+        "Specific events (optional)",
+        options=sorted(set(EVENT_CANONICAL.values())),
+        help="Add or refine with specific events"
+    )
+
+    # Meets
+    gb_meets = st.multiselect(
+        "Meets (optional)",
+        options=sorted(set(MEET_CANONICAL.values())),
+        help="Leave empty to use 'state' defaults if you include the word 'state' in your question"
+    )
+
+    # School
+    gb_school = st.text_input("School contains (optional)")
+
+    # Year range
+    c1, c2 = st.columns(2)
+    gb_year_from = c1.number_input("From year (optional)", min_value=2000, max_value=2100, value=0, step=1)
+    gb_year_to   = c2.number_input("To year (optional)",   min_value=2000, max_value=2100, value=0, step=1)
+
+    # Prompt archetype selector
+    archetype = st.selectbox(
+        "Question type",
+        options=[
+            "Who has won the most ...",
+            "List all champions ...",
+            "How many state championships has {athlete} won?"
+        ],
+        help="Choose a framing for your question"
+    )
+
+    if st.button("Generate question"):
+        parts = []
+
+        # Genders
+        if gb_genders:
+            parts.append(" ".join(g.lower() for g in gb_genders))
+
+        # Events (groups + explicit)
+        combined_events = sorted(set(events_from_groups) | set(gb_events))
+        if combined_events:
+            parts.append(", ".join(combined_events))
+
+        # Meets
+        if gb_meets:
+            parts.append(" at " + ", ".join(gb_meets))
+
+        # School
+        if gb_school.strip():
+            parts.append(f" from {gb_school.strip()}")
+
+        # Year range
+        if gb_year_from and gb_year_to and gb_year_from <= gb_year_to:
+            parts.append(f" between {gb_year_from} and {gb_year_to}")
+        elif gb_year_from and not gb_year_to:
+            parts.append(f" since {gb_year_from}")
+
+        # Build question by archetype
+        if archetype.startswith("Who has won the most"):
+            q_text = "Who has won the most " + " ".join(parts).strip()
+        elif archetype.startswith("List all champions"):
+            q_text = "List " + " ".join(parts).strip() + " champions"
+        else:
+            # Title count archetype placeholder (user should edit {athlete})
+            q_text = "How many state championships has {athlete} won?"
+            # If user specified meets, preserve; otherwise 'state' shortcut will kick in
+
+        # Stash and prefill
+        st.session_state["q_prefill"] = q_text
+        st.rerun()
+# ---- End Query Builder ----
+prefill = st.session_state.get("q_prefill", "")
+q = st.text_input("Type your question", value=prefill)
     if q and df is not None:
         f_multi = parse_question_multi(q)
 
