@@ -498,7 +498,7 @@ def all_athletes_index(df: pd.DataFrame) -> pd.DataFrame:
     )
     return schools.sort_values(["gender", "name"]).reset_index(drop=True)
 
-def title_count(df: pd.DataFrame, athlete_name: str, *, include_meets: set, include_relays: bool = False) -> tuple[int, pd.DataFrame]:
+def title_count(df: pd.DataFrame, athlete_name: str, *, include_meets: set, include_relays: bool = False) -> Tuple[int, pd.DataFrame]:
     nn = normalize_name(athlete_name)
     cur = df.copy()
     cur["name_norm"] = cur["name"].apply(normalize_name)
@@ -573,7 +573,7 @@ def top1_card(name: str, school: str, gender: str, wins: int, context: str = "")
         st.caption(" • ".join(parts))
         st.markdown(f"🏆 **{int(wins)}** wins")
 
-def info_card(title: str, lines: list[tuple[str, str]]):
+def info_card(title: str, lines: List[Tuple[str, str]]):
     with st.container(border=True):
         st.markdown(f"**{title}**")
         for k, v in lines:
@@ -734,7 +734,9 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     m = re.search(r"\b(?:has|did|for|by|from|at)\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
     if m:
         out["athletes"].append(m.group(1).strip())
-   m = re.search(r"\bby\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
+    m = re.search(r"\bby\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
+    if m:
+        out["athletes"].append(m.group(1).strip())
 
     out["schools"]  = list(dict.fromkeys(out["schools"]))
     out["athletes"] = list(dict.fromkeys(out["athletes"]))
