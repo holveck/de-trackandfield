@@ -546,29 +546,28 @@ def intent_banner(intent: str, subtitle: Optional[str] = None, emoji: str = "�
     title, icon = labels.get(intent, ("Results", emoji))
     st.markdown(f"### {icon} {title}" + (f" — {subtitle}" if subtitle else ""))
 
-def top1_card(name: str, school: str, gender: str, wins: int, context: str = ""):
-    st.markdown(
-        f"""
-<div style="border:1px solid #e6e6e6;border-radius:8px;padding:12px;background:#fafafa;margin-bottom:8px">
-  <div style="font-size:18px;margin-bottom:4px;"><b>{name}</b> — {school}</div>
-  <div style="color:#666">Gender: <b>{gender.title()}</b>{' • ' + context if context else ''}</div>
-  <div style="font-size:16px;margin-top:6px;">🏆 <b>{int(wins)}</b> wins</div>
-</div>
-""",
-        unsafe_allow_html=True
-    )
+# --- REPLACE these two helpers in your app ---
 
-def info_card(title: str, lines: List[Tuple[str, str]]):
-    inner = "".join([f"<div><b>{k}:</b> {v}</div>" for k,v in lines])
-    st.markdown(
-        f"""
-<div style="border:1px solid #e6e6e6;border-radius:8px;padding:12px;background:#fafafa;margin-bottom:8px">
-  <div style="font-size:18px;margin-bottom:6px;"><b>{title}</b></div>
-  <div style="line-height:1.4">{inner}</div>
-</div>
-""",
-        unsafe_allow_html=True
-    )
+def top1_card(name: str, school: str, gender: str, wins: int, context: str = ""):
+    # Theme-aware card using native container border (no custom CSS needed)
+    with st.container(border=True):
+        # Title line
+        st.markdown(f"**{name}** — {school}")
+        # Subline (gender + optional context)
+        parts = [f"Gender: **{gender.title()}**"]
+        if context:
+            parts.append(context)
+        st.caption(" • ".join(parts))
+        # Metric line
+        st.markdown(f"🏆 **{int(wins)}** wins")
+
+def info_card(title: str, lines: list[tuple[str, str]]):
+    # Theme-aware card using native container border
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        # Simple key/value lines
+        for k, v in lines:
+            st.markdown(f"- **{k}:** {v}")
 
 def metric_row(metrics: List[Tuple[str, str]]):
     cols = st.columns(len(metrics))
