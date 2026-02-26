@@ -10,6 +10,7 @@
 #   • Athlete Profiles (relays excluded)
 #   • MVPs parsing + Q&A (school to the right; co‑MVPs in same season block)
 #   • Multi-condition queries (events/meets/schools/athletes/genders + year ranges)
+#   • Leaderboards: “Who has won the most …”
 #   • “State” rule: if prompt contains 'state' but NOT 'indoor'/'outdoor',
 #       default meets → Division I, Division II, Indoor State Championship
 #   • MVPs tab + Data Status tab
@@ -96,6 +97,10 @@ EVENT_GROUP_SYNONYMS = {
     "throw": "throws", "throws": "throws",
     "relay": "relays", "relays": "relays", "4x": "relays",
 }
+
+# Track vs field partition (for “races”)
+TRACK_EVENTS = {"100/55","200","400","800","1600","3200","100/55H","110/55H","300H","4x100","4x200","4x400","4x800"}
+FIELD_EVENTS = {"LJ","TJ","HJ","PV","Shot put","Discus"}
 
 # ----------------------------
 # State-meet definitions
@@ -209,15 +214,13 @@ def _parse_season_label(lbl) -> Tuple[Optional[int], Optional[int], Optional[str
     try:
         import datetime as _dt
         if isinstance(lbl, _dt.datetime) or isinstance(lbl, _dt.date):
-            y = int(lbl.year)
-            return y, y, str(y)
+            y = int(lbl.year); return y, y, str(y)
     except Exception:
         pass
     s = str(lbl).strip()
     m = re.match(r"^(20\d{2})\s*[-/]\s*(\d{2}|\d{4})$", s)
     if m:
-        y1 = int(m.group(1))
-        y2txt = m.group(2)
+        y1 = int(m.group(1)); y2txt = m.group(2)
         y2 = int(y2txt) if len(y2txt) == 4 else int(str(y1)[:2] + y2txt)
         return y1, y2, f"{y1}-{str(y2)[-2:]}"
     m2 = re.match(r"^(20\d{2})$", s)
@@ -318,31 +321,27 @@ def guess_gender_for_name(df: pd.DataFrame, athlete_name: str) -> List[str]:
     return found or ["GIRLS", "BOYS"]
 
 # ----------------------------
-# NL helpers + multi-condition parsing
+# NL helpers + multi-condition parsing & leaderboards
 # ----------------------------
 def canonical_meet(token: str) -> Optional[str]:
     low = token.strip().lower()
     if low in MEET_CANONICAL:
         return MEET_CANONICAL[low]
     choice = difflib.get_close_matches(low, list(MEET_CANONICAL.keys()), n=1, cutoff=0.85)
-    if choice:
-        return MEET_CANONICAL[choice[0]]
+    if choice: return MEET_CANONICAL[choice[0]]
     return None
 
 def canonical_event(event_text: str, gender: Optional[str]) -> Optional[str]:
     t = event_text.strip().lower()
-    if t in EVENT_CANONICAL:
-        return EVENT_CANONICAL[t]
+    if t in EVENT_CANONICAL: return EVENT_CANONICAL[t]
     if "hurd" in t or t in {"55h", "110h", "100h"}:
         if gender == "GIRLS": return "100/55H"
         if gender == "BOYS":  return "110/55H"
         if "55" in t:         return "100/55H"
-    if t in {"55", "55m"}:
-        return "100/55"
+    if t in {"55", "55m"}: return "100/55"
     keys = list({v.lower(): v for v in EVENT_CANONICAL.values()}.keys())
     m = difflib.get_close_matches(t, keys, n=1, cutoff=0.8)
-    if m: return EVENT_CANONICAL[m[0]]
-    return None
+    return EVENT_CANONICAL[m[0]] if m else None
 
 def _tokenize_phrases(q: str) -> List[str]:
     s = q.lower()
@@ -357,22 +356,19 @@ def _expand_event_groups(words: List[str]) -> set:
         w = w.strip().lower()
         g = EVENT_GROUP_SYNONYMS.get(w) or (w if w in EVENT_GROUPS else None)
         if g and g in EVENT_GROUPS:
-            out |= EVENT_GROUPS[g]
-            continue
+            out |= EVENT_GROUPS[g]; continue
         ev = canonical_event(w, None)
-        if ev:
-            out.add(ev)
+        if ev: out.add(ev)
     return out
 
 def _find_multi_targets(q: str, vocabulary: Dict[str, str]) -> List[str]:
-    toks = _tokenize_phrases(q)
-    found = []
+    toks = _tokenize_phrases(q); found = []
     keys = sorted(vocabulary.keys(), key=len, reverse=True)
     for t in toks:
         for k in keys:
             if k in t:
                 found.append(vocabulary[k]); break
-    seen = set(); ordered = []
+    seen=set(); ordered=[]
     for x in found:
         if x not in seen:
             seen.add(x); ordered.append(x)
@@ -381,8 +377,7 @@ def _find_multi_targets(q: str, vocabulary: Dict[str, str]) -> List[str]:
 def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
     low = q.lower()
     m = re.search(r"(?:between|from)\s*(20\d{2})\s*(?:and|to|-)\s*(20\d{2})", low)
-    if m:
-        a, b = int(m.group(1)), int(m.group(2)); return (min(a,b), max(a,b))
+    if m: a, b = int(m.group(1)), int(m.group(2)); return (min(a,b), max(a,b))
     m = re.search(r"\b(since|after|from)\s*(20\d{2})\b", low)
     if m: return (int(m.group(2)), None)
     m = re.search(r"\bin\s*(20\d{2})\b", low)
@@ -393,26 +388,20 @@ def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
     return (None, None)
 
 def _extract_events_anywhere(q: str) -> set:
-    """NEW: find events/groups anywhere in the prompt (not just token-wise)."""
-    low = q.lower()
-    events = set()
-    # explicit canonical keys anywhere
+    low = q.lower(); events = set()
+    # explicit canonical keys
     for k in EVENT_CANONICAL.keys():
-        if k in low:
-            events.add(EVENT_CANONICAL[k])
-    # numeric/short tokens embedded in text
+        if k in low: events.add(EVENT_CANONICAL[k])
+    # numeric/short tokens
     for m in re.findall(r"\b(55|100|200|400|800|1600|3200|lj|tj|hj|pv|300h|110h|100h)\b", low):
         ev = canonical_event(m, None)
         if ev: events.add(ev)
     # long phrases for field events
-    for phrase in ["long jump", "triple jump", "high jump", "pole vault", "shot put", "discus"]:
-        if phrase in low:
-            events.add(EVENT_CANONICAL[phrase])
-    # groups anywhere
+    for phrase in ["long jump","triple jump","high jump","pole vault","shot put","discus"]:
+        if phrase in low: events.add(EVENT_CANONICAL[phrase])
+    # groups anywhere, and OR lists
     for syn, grp in EVENT_GROUP_SYNONYMS.items():
-        if syn in low:
-            events |= EVENT_GROUPS[grp]
-    # also from tokenized parts (OR lists like “LJ or TJ”)
+        if syn in low: events |= EVENT_GROUPS[grp]
     events |= _expand_event_groups(_tokenize_phrases(q))
     return events
 
@@ -422,7 +411,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         "genders": [], "events": set(), "meets": [],
         "schools": [], "athletes": [],
         "year_from": None, "year_to": None,
-        "raw": q
+        "raw": q, "top_n": 10, "track_only": False
     }
     low = q.lower()
 
@@ -437,6 +426,13 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         if "indoor" in low:          out["scope"] = "indoor"
         elif "outdoor" in low:       out["scope"] = "outdoor"
         elif "cross country" in low: out["scope"] = "cross country"
+    # leaderboard intent
+    if re.search(r"\bmost\b.*\b(win|wins|titles|races)\b", low) or re.search(r"\btop\s+\d+\b", low):
+        out["intent"] = "leaderboard_wins"
+    m_top = re.search(r"\btop\s+(\d+)\b", low)
+    if m_top: out["top_n"] = max(1, int(m_top.group(1)))
+    if "race" in low or "races" in low:
+        out["track_only"] = True
 
     # year range
     yf, yt = _extract_year_range(q)
@@ -453,7 +449,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     # meets
     out["meets"] = _find_multi_targets(low, MEET_CANONICAL)
 
-    # events (global)
+    # events
     out["events"] = _extract_events_anywhere(q)
 
     # schools after 'from/at/by'
@@ -495,7 +491,21 @@ def apply_multi_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.Dat
         cur = cur[(cur["year"] >= yf) & (cur["year"] <= yt)]
     elif yf and not yt:
         cur = cur[cur["year"] >= yf]
-    return cur.sort_values(["gender", "event", "meet", "year"], ascending=[True, True, True, False])
+    # “races” → track only
+    if f.get("track_only"):
+        cur = cur[cur["event"].isin(TRACK_EVENTS)]
+    return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
+
+def leaderboard_wins(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
+    """Aggregate wins by athlete (Name + School + Gender) using the same filters as champions."""
+    cur = apply_multi_filters(df, f)
+    # If no events specified but "track_only" is set, we've already filtered above.
+    grp = (cur.groupby(["gender","name","school"])
+              .size()
+              .reset_index(name="wins")
+              .sort_values(["wins","gender","name"], ascending=[False, True, True]))
+    top_n = f.get("top_n", 10)
+    return grp.head(top_n)
 
 # ----------------------------
 # Streamlit UI
@@ -523,7 +533,7 @@ with st.sidebar:
                 file_bytes = f.read()
             df = load_champions(file_bytes)
             mvps_df = load_mvps(file_bytes)
-            # Compile known schools for auto-detect in prompts
+            # Known schools for auto-detect in prompts (also helps MVP filtering)
             KNOWN_SCHOOLS = {s for s in df["school"].dropna().unique()}
             st.success(f"Loaded champions: {len(df):,} rows")
             st.success(f"Loaded MVPs: {len(mvps_df):,} rows")
@@ -537,24 +547,23 @@ with st.sidebar:
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔎 Ask a question", "🎛️ Explore", "👤 Athlete profiles", "🏆 MVPs", "🛠️ Data status"])
 
 # ----------------------------
-# Q&A — with multi-condition engine + intents
+# Q&A — with multi-condition engine + leaderboards + intents
 # ----------------------------
 with tab1:
     st.subheader("Natural-language Q&A")
     st.caption(
         "Examples: “Who won the girls 200 at Indoor in 2026?”, "
         "“How many state championships has Juliana Balon won?”, "
-        "“Show every Indoor State Championship boys champion from Caesar Rodney in 2024”, "
+        "“List every cross country state MVP from Tatnall”, "
+        "“Who has won the most Division I races?”, "
         "“Girls long jump or triple jump state champions at Padua since 2018”, "
-        "“List Padua sprint winners 2022–2026 at Indoor”, "
-        "“Who was the outdoor boys MVP in 2010?”, "
-        "“List every indoor state MVP for girls since 2010”."
+        "“List Padua sprint winners 2022–2026 at Indoor”."
     )
     q = st.text_input("Type your question")
     if q and df is not None:
         f_multi = parse_question_multi(q)
 
-        # ---- Title-count intent (same as before) ----
+        # ---- Title-count intent (unchanged) ----
         if f_multi.get("intent") == "count_titles" and f_multi.get("athletes"):
             scope = f_multi.get("scope")
             if scope == "indoor":
@@ -570,12 +579,12 @@ with tab1:
                 st.subheader(f"{f_multi['athletes'][0]} — {scope_label}")
                 st.metric("Titles", total_count)
                 if total_count > 0:
-                    c1, c2, c3 = st.columns(3)
+                    c1,c2,c3 = st.columns(3)
                     with c1: st.caption("By meet");  st.dataframe(rows.groupby("meet").size().reset_index(name="titles"))
                     with c2: st.caption("By event"); st.dataframe(rows.groupby("event").size().reset_index(name="titles"))
                     with c3: st.caption("By year");  st.dataframe(rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
                     st.caption("All title rows (relays excluded)")
-                    st.dataframe(rows[["gender", "year", "meet", "event", "class", "school", "mark"]], use_container_width=True)
+                    st.dataframe(rows[["gender","year","meet","event","class","school","mark"]], use_container_width=True)
                 st.stop()
             else:
                 genders = guess_gender_for_name(df, f_multi["athletes"][0])
@@ -584,46 +593,94 @@ with tab1:
                     c, rws = title_count(df[df["gender"] == g], f_multi["athletes"][0], include_meets=include_meets, include_relays=False)
                     st.metric(f"{g.title()} titles", c)
                     if c > 0:
-                        st.dataframe(rws[["gender", "year", "meet", "event", "class", "school", "mark"]], use_container_width=True)
+                        st.dataframe(rws[["gender","year","meet","event","class","school","mark"]], use_container_width=True)
                 st.stop()
 
-        # ---- MVP intent ----
+        # ---- MVP intent (now supports school filter) ----
         if f_multi.get("intent") == "mvp_lookup" and mvps_df is not None:
             scope_map = {"indoor": "Indoor", "outdoor": "Outdoor", "cross country": "Cross Country"}
             mvps_scope = scope_map.get(f_multi.get("scope"), None)
             cur = mvps_df.copy()
             if mvps_scope: cur = cur[cur["scope"] == mvps_scope]
             if f_multi["genders"]: cur = cur[cur["gender"].isin(f_multi["genders"])]
+            # school filter (substring)
+            if f_multi["schools"]:
+                mask = False
+                for s in f_multi["schools"]:
+                    needle = s.lower()
+                    mask = mask | cur["school"].str.lower().str.contains(needle, na=False)
+                cur = cur[mask]
+            # if no school given, auto-detect from prompt against known schools
+            if not f_multi["schools"] and KNOWN_SCHOOLS:
+                lowp = f_multi["raw"].lower()
+                auto = []
+                for s in KNOWN_SCHOOLS:
+                    if isinstance(s,str) and s.lower() in lowp:
+                        auto.append(s)
+                if auto:
+                    mask = False
+                    for s in auto:
+                        needle = s.lower()
+                        mask = mask | cur["school"].str.lower().str.contains(needle, na=False)
+                    cur = cur[mask]
+            # year filters (use season_end as inclusive “since”)
             yf, yt = f_multi["year_from"], f_multi["year_to"]
-            if yf and yt: cur = cur[(cur["season_end"] >= yf) & (cur["season_start"] <= yt)]
-            elif yf and not yt: cur = cur[cur["season_end"] >= yf]
+            if yf and yt:
+                cur = cur[(cur["season_end"] >= yf) & (cur["season_start"] <= yt)]
+            elif yf and not yt:
+                cur = cur[cur["season_end"] >= yf]
+            # Output
             if yf and yt and yf == yt:
-                if cur.empty: st.error("No MVP found for that combination. Try adjusting gender/scope/year.")
+                if cur.empty: st.error("No MVP found for that combination. Try adjusting gender/scope/year/school.")
                 else:
-                    st.success("MVP result"); st.dataframe(cur[["season_label","gender","scope","name","school","category"]], use_container_width=True)
+                    st.success("MVP result")
+                    st.dataframe(cur[["season_label","gender","scope","name","school","category"]], use_container_width=True)
                 st.stop()
             else:
                 if cur.empty: st.warning("No MVPs matched your filters.")
                 else:
-                    st.dataframe(cur.sort_values(["season_end","gender","scope"])[["season_label","gender","scope","name","school","category"]], use_container_width=True)
+                    st.dataframe(cur.sort_values(["season_end","gender","scope"])[["season_label","gender","scope","name","school","category"]],
+                                 use_container_width=True)
                 st.stop()
 
-        # ---- Champions multi-condition filtering ----
+        # ---- Leaderboard intent: "Who has won the most …" ----
+        if f_multi.get("intent") == "leaderboard_wins":
+            # “state” rule if no indoor/outdoor explicitly mentioned
+            lowp = f_multi["raw"].lower()
+            if ("state" in lowp) and ("indoor" not in lowp) and ("outdoor" not in lowp) and not f_multi["meets"]:
+                f_multi["meets"] = list(STATE_MEETS_ALL)
 
-        # Special 'state' rule (if no explicit indoor/outdoor meets given)
+            # If “Division I” etc. is present, already captured in f_multi["meets"].
+            # Auto-detect schools (helps prompts like “… from Tatnall” that weren't parsed)
+            if not f_multi["schools"] and KNOWN_SCHOOLS:
+                lowq = f_multi["raw"].lower()
+                for s in KNOWN_SCHOOLS:
+                    if isinstance(s,str) and s.lower() in lowq:
+                        f_multi["schools"].append(s)
+
+            lb = leaderboard_wins(df, f_multi)
+            if lb.empty:
+                st.error("No matching winners found for your leaderboard filters.")
+                with st.expander("Detected filters"):
+                    st.json(f_multi)
+            else:
+                title = "Top winners"
+                if f_multi["meets"]: title += f" — {', '.join(f_multi['meets'])}"
+                if f_multi["events"]: title += f" | Events: {', '.join(sorted(f_multi['events']))}"
+                st.subheader(title)
+                st.dataframe(lb.reset_index(drop=True), use_container_width=True)
+            st.stop()
+
+        # ---- Champions multi-condition fallback ----
         low = f_multi["raw"].lower()
         if ("state" in low) and ("indoor" not in low) and ("outdoor" not in low) and not f_multi["meets"]:
             f_multi["meets"] = list(STATE_MEETS_ALL)
-
-        # Helpful default for 55 events when no meet given (indoor dash/hurdles)
         if ({"100/55","100/55H","110/55H"} & f_multi["events"]) and not f_multi["meets"]:
             f_multi["meets"] = list(STATE_MEETS_INDOOR)
-
-        # NEW: auto-detect schools by scanning known school names in prompt
         if not f_multi["schools"] and KNOWN_SCHOOLS:
             lowp = f_multi["raw"].lower()
             for s in KNOWN_SCHOOLS:
-                if isinstance(s, str) and s.lower() in lowp:
+                if isinstance(s,str) and s.lower() in lowp:
                     f_multi["schools"].append(s)
 
         result = apply_multi_filters(df, f_multi)
@@ -633,7 +690,6 @@ with tab1:
             with st.expander("Detected filters"):
                 st.json(f_multi)
         else:
-            # Winner card if query is very specific
             if (f_multi.get("year_from") == f_multi.get("year_to")
                 and len(f_multi.get("events", [])) == 1
                 and len(result) == 1):
@@ -643,7 +699,7 @@ with tab1:
                     f"🏅 **{row['name']}** ({row['class']}) — {row['school']} — **{row['mark']}**"
                 )
             st.dataframe(
-                result[["gender", "event", "meet", "year", "name", "class", "school", "mark"]].reset_index(drop=True),
+                result[["gender","event","meet","year","name","class","school","mark"]].reset_index(drop=True),
                 use_container_width=True,
             )
 
@@ -677,7 +733,7 @@ with tab2:
             ]
         st.metric("Matching champions", f"{len(cur):,}")
         st.dataframe(
-            cur.sort_values(["gender", "event", "meet", "year"], ascending=[True, True, True, False]).reset_index(drop=True),
+            cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False]).reset_index(drop=True),
             use_container_width=True
         )
 
@@ -717,7 +773,7 @@ with tab3:
             if any(c for _, c, _ in collected):
                 all_rows = pd.concat([r for _, c, r in collected if c > 0], ignore_index=True)
                 if not all_rows.empty:
-                    c1, c2, c3 = st.columns(3)
+                    c1,c2,c3 = st.columns(3)
                     with c1: st.caption("By meet");  st.dataframe(all_rows.groupby("meet").size().reset_index(name="titles"))
                     with c2: st.caption("By event"); st.dataframe(all_rows.groupby("event").size().reset_index(name="titles"))
                     with c3: st.caption("By year");  st.dataframe(all_rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
@@ -753,7 +809,7 @@ with tab5:
         st.info("No data loaded.")
     else:
         try:
-            c1, c2, c3, c4 = st.columns(4)
+            c1,c2,c3,c4 = st.columns(4)
             c1.metric("Champion rows", f"{len(df):,}")
             c2.metric("Min champ year", int(df["year"].min()))
             c3.metric("Max champ year", int(df["year"].max()))
