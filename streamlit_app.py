@@ -734,8 +734,9 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     m = re.search(r"\b(?:has|did|for|by|from|at)\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
     if m:
         out["athletes"].append(m.group(1).strip())
-    m = re.search(r"\bby\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q):
-        out["athletes"].append(m.group(1).strip())
+   m = re.search(r"\bby\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
+if m:
+    out["athletes"].append(m.group(1).strip())
 
     out["schools"]  = list(dict.fromkeys(out["schools"]))
     out["athletes"] = list(dict.fromkeys(out["athletes"]))
