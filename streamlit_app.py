@@ -690,14 +690,11 @@ with tab1:
 
     # ---- QUICK EXAMPLE CHIPS ----
     example_prompts = [
-        "Who won the girls 200 at Indoor in 2026?",
-        "How many state championships has Juliana Balon won?",
+        "How many state championships did Juliana Balon win?",
         "Who has won the most Division I races?",
-        "Girls long jump or triple jump state champions at Padua since 2018",
         # Hard cases:
-        "Who has won the boys 200 the most at the indoor state championships?",
         "Who has won the boys 400 the most at the Meet of Champions?",
-        "When was the last time a Middletown runner won the Meet of Champions 400?",
+        "When was the last time a Middletown runner won the Meet of Champions 200?",
         "When was the last time a girl won the 800, 1600 and 3200 at a single indoor track and field state meet?",
         "Who was the last girl to win the 55H, 55 and 200 at the indoor track and field state meet?",
     ]
