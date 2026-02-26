@@ -15,11 +15,12 @@
 #       default meets → Division I, Division II, Indoor State Championship
 #   • MVPs tab + Data Status tab
 #   • Quick example chips + deep-linking (?q=)
-#   • FIXES:
-#       - Meet canonicalization during parsing (keeps “indoor state championships” rows)
+#   • FIXES (this version):
+#       - Meet canonicalization during parsing
 #       - Leaderboard intent detects both “most … won” and “won … most”
-#       - Robust “last time” and “last sweep” answers
-#       - Uniform table rendering (hide index; show Girls/Boys; Gender first)
+#       - Robust “Who was the last … to win …” and “When was the last time … won …”
+#       - Accurate event selection for phrases like "long jump or triple jump" (no HJ bleed-through)
+#       - Uniform table rendering (hide index; Girls/Boys; Gender first)
 
 import io
 import re
@@ -454,9 +455,8 @@ def _extract_events_anywhere(q: str) -> set:
     # long phrases for field events
     for phrase in ["long jump","triple jump","high jump","pole vault","shot put","discus"]:
         if phrase in low: events.add(EVENT_CANONICAL[phrase])
-    # groups anywhere, and OR lists
-    for syn, grp in EVENT_GROUP_SYNONYMS.items():
-        if syn in low: events |= EVENT_GROUPS[grp]
+    # IMPORTANT: do NOT add group synonyms indiscriminately (avoids HJ leakage from "long jump")
+    # Instead, expand only phrase-level tokens (e.g., "long jump", "triple jump", "sprints")
     events |= _expand_event_groups(_tokenize_phrases(q))
     return events
 
@@ -493,6 +493,10 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
 
     # "When was the last time ... won ..." (last_win_time)
     if re.search(r"\bwhen was the last time\b.*\bwon\b", low) or re.search(r"\bmost recent\b.*\bwin\b", low):
+        out["intent"] = "last_win_time"
+
+    # NEW: "Who was the last ... to win ..." (covers your 55H/55/200 prompt)
+    if re.search(r"\bwho was the last\b.*\bto win\b", low):
         out["intent"] = "last_win_time"
     # ---------------------------------
 
@@ -545,8 +549,8 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     out["schools"]  = list(dict.fromkeys(out["schools"]))
     out["athletes"] = list(dict.fromkeys(out["athletes"]))
 
-    # Upgrade to sweep if multiple events + 'single'/'same meet'
-    if out["intent"] == "last_win_time" and len(out["events"]) >= 2 and (("single" in low) or ("same meet" in low)):
+    # UPGRADE to sweep if MULTIPLE events are present (no need to require "single/same")
+    if out["intent"] in ("last_win_time", "last_sweep") and len(out["events"]) >= 2:
         out["intent"] = "last_sweep"
 
     return out
@@ -560,7 +564,6 @@ def apply_multi_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.Dat
     if f["events"]:
         cur = cur[cur["event"].isin(set(f["events"]))]
     if f["schools"]:
-        # Safer mask initialization aligned to current frame (FIX)
         mask = pd.Series(False, index=cur.index)
         for s in f["schools"]:
             needle = s.lower()
@@ -684,11 +687,12 @@ with tab1:
         "How many state championships has Juliana Balon won?",
         "Who has won the most Division I races?",
         "Girls long jump or triple jump state champions at Padua since 2018",
-        # Also include the new hard cases as examples:
+        # Also include the hard cases as examples:
         "Who has won the boys 200 the most at the indoor state championships?",
         "Who has won the boys 400 the most at the Meet of Champions?",
         "When was the last time a Middletown runner won the Meet of Champions 400?",
         "When was the last time a girl won the 800, 1600 and 3200 at a single indoor track and field state meet?",
+        "Who was the last girl to win the 55H, 55 and 200 at the indoor track and field state meet?",
     ]
     st.caption("Quick examples:")
     ex_cols = st.columns(2)
@@ -722,7 +726,7 @@ with tab1:
 
         # ---- Title-count intent ----
         if f_multi.get("intent") == "count_titles":
-            # If no athlete parsed, try to auto-detect from known athletes
+            # If no athlete parsed, auto-detect from known athletes
             if not f_multi["athletes"]:
                 lowp = f_multi["raw"].lower()
                 candidates = []
@@ -890,7 +894,8 @@ with tab1:
 
             last_year = int(sweeps["year"].max())
             last_hits = sweeps[sweeps["year"] == last_year].sort_values(["gender","meet","name"])
-            st.success(f"**Most recent sweep:** {last_year}")
+            winners = ", ".join(sorted(last_hits["name"].unique()))
+            st.success(f"**Most recent sweep:** {last_year} — {winners}")
             detail = cur[cur["year"] == last_year]
             detail = detail.merge(last_hits[["year","meet","gender","name"]], on=["year","meet","gender","name"], how="inner")
             detail = detail.sort_values(["gender","meet","name","event"])
