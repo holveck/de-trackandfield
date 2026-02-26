@@ -1,32 +1,30 @@
 # streamlit_app.py
 # ---------------------------------------------------------
-# Delaware HS T&F Champions Q&A — Streamlit
-# Loads your “Delaware Track and Field Supersheet (6).xlsx”
-# and answers natural-language queries + provides filters.
+# Delaware HS Track & Field Champions Q&A — Streamlit
+# Bundled workbook version (no upload required).
 #
 # How it works:
-#   • Detect year columns on row 1 (each 4-col bundle: name, class, school, mark)
-#   • Walk each event block (col A) + meet rows (col E)
-#   • Build normalized rows per gender/event/meet/year
+#   • Detects year bundles on row 1: [Year][Name][Class][School][Mark] in 4-col groups
+#   • Reads event labels from column A and meet labels from column E
+#   • Normalizes GIRLS + BOYS into one table: gender, event, meet, year, name, class, school, mark
 #
-# Assumptions (from your workbook’s structure):
-#   • GIRLS and BOYS sheets use the same layout
-#   • Row 1 contains years across columns, every 4 columns
-#   • Column A holds event names, Column E holds meet names
-#
-# (C) You. Feel free to adapt/extend for newsroom use.
+# Notes:
+#   • Place "Delaware Track and Field Supersheet (6).xlsx" in the same folder as this file.
+#   • The parser expects GIRLS and BOYS sheets with the layout described above.
 
 import io
 import re
 import difflib
 from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import openpyxl
 
+
 # ----------------------------
-# Constants & synonym helpers
+# Canonical dictionaries & aliases
 # ----------------------------
 MEETS = {
     "Division I": {"division 1", "div i", "d1"},
@@ -36,7 +34,6 @@ MEETS = {
     "Henlopen Conference": {"henlopen"},
     "Indoor State Championship": {"indoor", "indoor state", "state indoor", "indoor championship"},
 }
-# invert synonyms for easier lookups
 MEET_CANONICAL = {}
 for k, vals in MEETS.items():
     MEET_CANONICAL[k.lower()] = k
@@ -82,11 +79,11 @@ for k, vals in GENDER_ALIASES.items():
 
 
 # ----------------------------
-# Parsing the Excel workbook
+# Workbook parsing helpers
 # ----------------------------
 def detect_year_bundles(ws) -> List[Tuple[int, int]]:
-    """Return a list of (year, start_col) for each 4-col bundle on row 1."""
-    bundles = []
+    """Return list of (year, start_col) for each 4-column bundle on row 1."""
+    bundles: List[Tuple[int, int]] = []
     col = 1
     maxc = ws.max_column
     while col <= maxc:
@@ -100,45 +97,37 @@ def detect_year_bundles(ws) -> List[Tuple[int, int]]:
 
 
 def normalize_event_label(raw) -> Optional[str]:
-    """From column A value → canonical event string."""
+    """Normalize the column A event label to a canonical event string."""
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
-        # e.g., 200.0 → "200"
         s = str(int(raw)) if float(raw).is_integer() else str(raw)
         return s.replace(".0", "")
     s = str(raw).strip()
-    # Often workbook stores these as 100/55, 100/55H etc.
     low = s.lower()
-    # Match direct
     if low in EVENT_CANONICAL:
         return EVENT_CANONICAL[low]
-    # Handle trailing ".0"
     if low.endswith(".0") and low[:-2] in EVENT_CANONICAL:
         return EVENT_CANONICAL[low[:-2]]
-    # If this looks like a clean number (e.g., "200"), keep it
     if re.fullmatch(r"\d{2,4}", s):
         return s
     return s
 
 
 def parse_champions_sheet(ws, gender: str) -> pd.DataFrame:
-    """Parse one sheet (GIRLS or BOYS) to normalized champions data."""
+    """Parse GIRLS or BOYS sheet into normalized champions rows."""
     year_bundles = detect_year_bundles(ws)
     records = []
 
-    # Walk rows; event label sits in column A; meet label sits in column E
-    current_event = None
+    current_event: Optional[str] = None
     for r in range(1, ws.max_row + 1):
-        ev_raw = ws.cell(row=r, column=1).value
+        ev_raw = ws.cell(row=r, column=1).value  # Column A
         if ev_raw:
             maybe_ev = normalize_event_label(ev_raw)
-            # Event rows are placed at regular intervals in col A
-            # We treat any non-empty here as a likely event marker.
             if maybe_ev:
                 current_event = maybe_ev
 
-        meet_raw = ws.cell(row=r, column=5).value  # col E
+        meet_raw = ws.cell(row=r, column=5).value  # Column E
         if current_event and isinstance(meet_raw, str) and meet_raw.strip() in MEETS:
             meet_name = meet_raw.strip()
             for (year, c0) in year_bundles:
@@ -160,30 +149,27 @@ def parse_champions_sheet(ws, gender: str) -> pd.DataFrame:
                         }
                     )
 
-    df = pd.DataFrame.from_records(records)
-    return df
+    return pd.DataFrame.from_records(records)
 
 
 @st.cache_data(show_spinner=False)
 def load_and_parse(file_bytes: bytes) -> pd.DataFrame:
-    """Load the Excel workbook from bytes and parse both GIRLS & BOYS."""
+    """Load Excel bytes and parse GIRLS + BOYS sheets into a single DataFrame."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     girls_df = parse_champions_sheet(wb["GIRLS"], "GIRLS")
     boys_df = parse_champions_sheet(wb["BOYS"], "BOYS")
     out = pd.concat([girls_df, boys_df], ignore_index=True)
-    # Clean a few common quirks
     out["event"] = out["event"].astype(str).str.replace(r"\.0$", "", regex=True)
     return out
 
 
 # ----------------------------
-# Natural-language query parsing
+# Natural-language parsing
 # ----------------------------
 def canonical_meet(token: str) -> Optional[str]:
     low = token.strip().lower()
     if low in MEET_CANONICAL:
         return MEET_CANONICAL[low]
-    # try fuzzy
     choice = difflib.get_close_matches(low, list(MEET_CANONICAL.keys()), n=1, cutoff=0.85)
     if choice:
         return MEET_CANONICAL[choice[0]]
@@ -191,14 +177,7 @@ def canonical_meet(token: str) -> Optional[str]:
 
 
 def canonical_event(event_text: str, gender: Optional[str]) -> Optional[str]:
-    """
-    Resolve an event string to workbook canonical.
-    Special handling:
-      • If user says '55' for indoor sprint: map to '100/55'
-      • '55 hurdles' → GIRLS '100/55H', BOYS '110/55H'
-    """
     t = event_text.strip().lower()
-    # direct dictionary mapping
     if t in EVENT_CANONICAL:
         return EVENT_CANONICAL[t]
 
@@ -208,17 +187,12 @@ def canonical_event(event_text: str, gender: Optional[str]) -> Optional[str]:
             return "100/55H"
         if gender == "BOYS":
             return "110/55H"
-        # fallback: prefer girls mapping for '55h' if gender unknown
         if "55" in t:
             return "100/55H"
 
-    # 55 dash ambiguity
     if t in {"55", "55m"}:
         return "100/55"
 
-    # mile / two-mile, etc. handled in dictionary above
-
-    # fuzzy last resort against canonical keys
     canon_keys = list({v.lower(): v for v in EVENT_CANONICAL.values()}.keys())
     m = difflib.get_close_matches(t, canon_keys, n=1, cutoff=0.8)
     if m:
@@ -227,19 +201,11 @@ def canonical_event(event_text: str, gender: Optional[str]) -> Optional[str]:
 
 
 def parse_question(q: str) -> Dict[str, Optional[str]]:
-    """
-    Extract coarse filters:
-      • gender
-      • event
-      • meet
-      • year
-      • name/school (if present), used for athlete-focused queries
-    """
     out = {"gender": None, "event": None, "meet": None, "year": None, "name": None, "school": None}
     t = q.strip()
 
     # year
-    y = re.findall(r"(20\\d{2})", t)
+    y = re.findall(r"(20\d{2})", t)
     if y:
         out["year"] = int(y[0])
 
@@ -252,36 +218,31 @@ def parse_question(q: str) -> Dict[str, Optional[str]]:
             break
     out["gender"] = gmatch
 
-    # meet (scan words/phrases)
-    # check multi-word first
+    # meet (search phrases)
     lowered = t.lower()
     for phrase in sorted(MEET_CANONICAL.keys(), key=len, reverse=True):
         if phrase in lowered:
             out["meet"] = MEET_CANONICAL[phrase]
             break
 
-    # event: try typical tokens ('200', 'mile', 'long jump', etc.)
-    # search longer phrases first
+    # event
     for ev_phrase in sorted(EVENT_CANONICAL.keys(), key=len, reverse=True):
         if ev_phrase in lowered:
             out["event"] = EVENT_CANONICAL[ev_phrase]
             break
-
-    # if still none, try simple numerics as event candidates
     if not out["event"]:
-        nums = re.findall(r"\\b(\\d{2,4})\\b", t)
+        nums = re.findall(r"\b(\d{2,4})\b", t)
         if nums:
             out["event"] = canonical_event(nums[0], out["gender"])
 
-    # athlete or school hint (simple heuristic: quoted string or “by <name>”)
+    # athlete / school hint
     m = re.search(r'\"([^\"]+)\"', t)
     if m:
         out["name"] = m.group(1).strip()
-
-    # if contains common connecting phrase
-    m2 = re.search(r"(?:by|from|at)\\s+([A-Z][A-Za-z\\-']+(?:\\s+[A-Z][A-Za-z\\-']+)*)", q)
-    if m2 and not out["name"]:
-        out["name"] = m2.group(1).strip()
+    else:
+        m2 = re.search(r"(?:by|from|at)\s+([A-Z][A-Za-z\-']+(?:\s+[A-Z][A-Za-z\-']+)*)", q)
+        if m2:
+            out["name"] = m2.group(1).strip()
 
     return out
 
@@ -291,10 +252,8 @@ def apply_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame
     if f.get("gender"):
         cur = cur[cur["gender"] == f["gender"]]
     if f.get("event"):
-        # Handle boys/girls hurdles disambiguation (same sheet uses 100/55H for girls, 110/55H for boys)
         ev = f["event"]
         if ev in {"100/55H", "110/55H"} and f.get("gender") is None:
-            # if gender unknown, accept both hurdles labels
             cur = cur[cur["event"].isin(["100/55H", "110/55H"])]
         else:
             cur = cur[cur["event"] == ev]
@@ -303,7 +262,6 @@ def apply_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame
     if f.get("year"):
         cur = cur[cur["year"] == f["year"]]
     if f.get("name"):
-        # fuzzy match on name OR school
         needle = f["name"].lower()
         cur = cur[
             cur["name"].str.lower().str.contains(needle, na=False)
@@ -318,66 +276,58 @@ def apply_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame
 st.set_page_config(page_title="DE HS Track & Field Champions Q&A", page_icon="🏃", layout="wide")
 st.title("Delaware HS Track & Field — Champions Q&A")
 
+# ---------- FIX 1: Bundled, path-safe loader (no upload required) ----------
+APP_DIR = Path(__file__).parent
+BUNDLED_XLSX_NAME = "Delaware Track and Field Supersheet (6).xlsx"
+BUNDLED_XLSX_PATH = APP_DIR / BUNDLED_XLSX_NAME
+
 with st.sidebar:
-    st.header("Load data")
-    data_source = st.radio(
-        "Choose source",
-        options=["Use packaged file (recommended)", "Upload your own workbook"],
-        index=0,
-    )
-
-    default_bytes = None
-    if data_source == "Upload your own workbook":
-        upl = st.file_uploader("Upload Excel (.xlsx) with GIRLS / BOYS sheets", type=["xlsx"])
-        if upl:
-            default_bytes = upl.read()
-    else:
-        # packaged file: place the Excel next to this script and read it
-        try:
-            with open("Delaware Track and Field Supersheet (6).xlsx", "rb") as f:
-                default_bytes = f.read()
-        except FileNotFoundError:
-            st.warning("Packaged file not found. Upload your workbook instead.")
-
-    if default_bytes:
-        df = load_and_parse(default_bytes)
-        st.success(f"Loaded champions: {len(df):,} rows")
-        st.download_button(
-            label="Download normalized champions (CSV)",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="de_champions_normalized.csv",
-            mime="text/csv",
+    st.header("Data source")
+    if not BUNDLED_XLSX_PATH.exists():
+        st.error(
+            f"Bundled workbook not found at:\n{BUNDLED_XLSX_PATH}\n\n"
+            "• Ensure the file is in the repo alongside streamlit_app.py\n"
+            "• Verify the name matches exactly (including spaces & parentheses)."
         )
-    else:
         df = None
+    else:
+        try:
+            with open(BUNDLED_XLSX_PATH, "rb") as f:
+                default_bytes = f.read()
+            df = load_and_parse(default_bytes)
+            st.success(f"Loaded champions: {len(df):,} rows")
+            st.caption(f"Workbook: {BUNDLED_XLSX_NAME}")
+        except Exception as ex:
+            st.error("There was a problem parsing the bundled workbook.")
+            st.exception(ex)
+            df = None
+# ---------------------------------------------------------------------------
 
-tab1, tab2 = st.tabs(["🔎 Ask a question", "🎛️ Explore"])
+tab1, tab2, tab3 = st.tabs(["🔎 Ask a question", "🎛️ Explore", "🛠️ Data status"])
 
 with tab1:
     st.subheader("Natural-language Q&A")
-    st.caption("Examples: “Who won the girls 200 at Indoor in 2026?”, “Show Juliana Balon’s indoor titles”, “Boys long jump MOC 2024”")
+    st.caption("Examples: “Who won the girls 200 at Indoor in 2026?”, “Show Juliana Balon indoor titles”, “Boys long jump MOC 2024”.")
     q = st.text_input("Type your question")
     if q and df is not None:
         filters = parse_question(q)
-        # Auto-infer meet if user said “55” and also typed “indoor”
+
+        # Helpful default: if user asked about '55' dash/hurdles but no meet, assume Indoor
         if (filters.get("event") in {"100/55", "100/55H", "110/55H"}) and not filters.get("meet"):
             filters["meet"] = "Indoor State Championship"
 
         result = apply_filters(df, filters)
-        # When overly broad, summarize first
         if result.empty:
-            st.error("No matches found. Try adding a meet, year, or gender.")
-            # show a small hint
-            st.write("Detected filters:", filters)
+            st.error("No matches found. Try adding gender, meet, or year.")
+            with st.expander("Detected filters"):
+                st.json(filters)
         else:
-            # If the query resolves to a single champion, present as a card
             if (filters.get("year") and filters.get("meet") and filters.get("event") and result.shape[0] == 1):
                 row = result.iloc[0]
                 st.success(
                     f"**{row['gender'].title()} {row['event']} — {row['meet']} {row['year']}**\n\n"
                     f"🏅 **{row['name']}** ({row['class']}) — {row['school']} — **{row['mark']}**"
                 )
-            # Otherwise show a tidy table
             st.dataframe(
                 result[["gender", "event", "meet", "year", "name", "class", "school", "mark"]]
                 .sort_values(["gender", "event", "meet", "year"], ascending=[True, True, True, False])
@@ -388,13 +338,12 @@ with tab1:
 with tab2:
     st.subheader("Filter champions")
     if df is None:
-        st.info("Load a workbook in the sidebar to begin.")
+        st.info("Bundled workbook not loaded.")
     else:
         c1, c2, c3, c4, c5 = st.columns(5)
         g = c1.selectbox("Gender", options=["(any)"] + sorted(df["gender"].unique().tolist()))
         m = c2.selectbox("Meet", options=["(any)"] + sorted(df["meet"].unique().tolist()))
-        # event picker with friendly names
-        ev_all = sorted(df["event"].unique().tolist(), key=lambda x: (x in {"LJ","TJ","HJ","PV"}, x))
+        ev_all = sorted(df["event"].unique().tolist())
         ev = c3.selectbox("Event", options=["(any)"] + ev_all)
         yrs = sorted(df["year"].dropna().unique().tolist(), reverse=True)
         y = c4.selectbox("Year", options=["(any)"] + yrs)
@@ -415,6 +364,20 @@ with tab2:
         st.metric("Matching champions", f"{len(cur):,}")
         st.dataframe(
             cur.sort_values(["gender", "event", "meet", "year"], ascending=[True, True, True, False])
-              .reset_index(drop=True),
+               .reset_index(drop=True),
             use_container_width=True
         )
+
+with tab3:
+    st.subheader("Data status / debug")
+    if df is None:
+        st.info("No data loaded.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total rows", f"{len(df):,}")
+        c2.metric("Min year", int(df["year"].min()))
+        c3.metric("Max year", int(df["year"].max()))
+        st.write("Meets:", sorted(df["meet"].unique()))
+        st.write("Events (sample):", sorted(df["event"].unique())[:16])
+        st.write("Example rows:")
+        st.dataframe(df.head(20), use_container_width=True)
