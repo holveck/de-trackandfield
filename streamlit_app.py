@@ -16,10 +16,12 @@
 # Updates implemented:
 #   • Removed intent headers (start results with info cards/tables)
 #   • Added "Edit detected filters" expander (override parser outputs)
-#   • Added Altair timeline for last-win / last-sweep
+#   • Added Altair timeline for last-win (sweep charts removed per latest request)
 #   • Added synonym: "New Castle County championships"
-#   • All-time tables now show Rank (first number column) + include Location
+#   • All-time tables now show Rank (first number column, integer) + include Location
 #   • Reduced quick example chips to four
+#   • Title count: single total metric + bar chart by year (no per-gender banners)
+#   • MVP lookup: show "athlete name, school" list instead of a numeric metric, then table
 
 import io
 import re
@@ -91,7 +93,7 @@ for canonical, synonyms in GENDER_ALIASES.items():
     for s in synonyms:
         GENDER_CANONICAL[s] = canonical.upper()
 
-# ---------- Event groups (requested definitions) ----------
+# ---------- Event groups ----------
 EVENT_GROUPS = {
     "distance": {"800", "1600", "3200"},
     "sprints": {"100/55", "110/55H", "200", "400", "300H"},
@@ -384,8 +386,7 @@ def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
 
         m = re.match(r"^(Girls|Boys)\s+(.+)$", sheet_title, flags=re.IGNORECASE)
         if not m:
-            # skip non per-event sheets (e.g., State records / log)
-            continue
+            continue  # skip non per-event sheets
 
         gender_txt = m.group(1).upper()
         gender = "GIRLS" if gender_txt.startswith("GIRL") else "BOYS"
@@ -540,16 +541,24 @@ def show_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     cur = _reorder_gender_first(cur)
     st.dataframe(cur, use_container_width=True, hide_index=True)
 
+def _format_rank_as_string(df: pd.DataFrame) -> pd.DataFrame:
+    """Show rank as a left-aligned integer string (e.g., '1', not '1.0')."""
+    if "rank" in df.columns:
+        s = pd.to_numeric(df["rank"], errors="coerce")
+        df["rank"] = s.apply(lambda v: "" if pd.isna(v) else str(int(v)))
+    return df
+
 def show_alltime_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     """
     Dedicated table renderer for all-time results:
-      - Rank (if present) as the first column
+      - Rank (if present) as the first column (integer-like string, left aligned)
       - Include Location
       - Do NOT reorder gender to first (keep Rank at far left)
     """
     if df is None:
         return
     cur = df.copy()
+    cur = _format_rank_as_string(cur)
     default_cols = []
     if "rank" in cur.columns: default_cols.append("rank")
     default_cols += ["gender","event","mark","name","school","year","meet"]
@@ -564,7 +573,6 @@ def show_alltime_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     st.dataframe(cur, use_container_width=True, hide_index=True)
 
 def top1_card(name: str, school: str, gender: str, wins: int, context: str = ""):
-    # Theme-aware card using native container border (no custom CSS needed)
     with st.container(border=True):
         st.markdown(f"**{name}** — {school}")
         parts = [f"Gender: **{gender.title()}**"]
@@ -678,7 +686,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         elif "outdoor" in low:       out["scope"] = "outdoor"
         elif "cross country" in low: out["scope"] = "cross country"
 
-    # Leaderboard — both orders
+    # Leaderboard
     if (re.search(r"\b(most|record)\b.*\b(win|wins|won|titles?|races?)\b", low) or
         re.search(r"\b(win|wins|won|titles?|races?)\b.*\b(most|record)\b", low) or
         re.search(r"\btop\s+\d+\b", low)):
@@ -1056,27 +1064,26 @@ with tab1:
                 scope_label = "State championships" if include_meets == STATE_MEETS_ALL else "Championships (all meets)"
 
             athlete = f_multi["athletes"][0]
-            if f_multi["genders"]:
-                df_scope = df[df["gender"].isin(f_multi["genders"])]
-                total_count, rows = title_count(df_scope, athlete, include_meets=include_meets, include_relays=False)
-                metric_row([("Titles", str(total_count))])
-                if total_count > 0:
-                    c1,c2,c3 = st.columns(3)
-                    with c1: st.caption("By meet");  show_table(rows.groupby("meet").size().reset_index(name="titles"))
-                    with c2: st.caption("By event"); show_table(rows.groupby("event").size().reset_index(name="titles"))
-                    with c3: st.caption("By year");  show_table(rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
-                    st.caption("Title rows (relays excluded)")
-                    show_table(rows[["gender","year","meet","event","class","school","mark"]])
-                st.stop()
-            else:
-                genders = guess_gender_for_name(df, athlete)
-                metric_row([("Possible genders", " / ".join([g.title() for g in genders]))])
-                for g in genders:
-                    c, rws = title_count(df[df["gender"] == g], athlete, include_meets=include_meets, include_relays=False)
-                    st.caption(f"{g.title()} titles: {c}")
-                    if c > 0:
-                        show_table(rws[["gender","year","meet","event","class","school","mark"]])
-                st.stop()
+            # Determine which genders to include (if not specified, use guessed; no banners)
+            genders_to_check = f_multi["genders"] if f_multi["genders"] else guess_gender_for_name(df, athlete)
+            df_scope = df[df["gender"].isin(genders_to_check)]
+
+            total_count, rows = title_count(df_scope, athlete, include_meets=include_meets, include_relays=False)
+            metric_row([("Titles", str(total_count))])
+
+            if total_count > 0:
+                # Bar chart: titles by year (exclude years with zero by definition)
+                timeline_chart = plot_timeline_year_counts(rows[["year"]].dropna(), title="Titles by year")
+                if timeline_chart is not None:
+                    st.altair_chart(timeline_chart, use_container_width=True)
+
+                c1,c2,c3 = st.columns(3)
+                with c1: st.caption("By meet");  show_table(rows.groupby("meet").size().reset_index(name="titles"))
+                with c2: st.caption("By event"); show_table(rows.groupby("event").size().reset_index(name="titles"))
+                with c3: st.caption("By year");  show_table(rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
+                st.caption("Title rows (relays excluded)")
+                show_table(rows[["gender","year","meet","event","class","school","mark"]])
+            st.stop()
 
         # ---- MVP lookup ----
         if f_multi.get("intent") == "mvp_lookup" and mvps_df is not None:
@@ -1111,10 +1118,18 @@ with tab1:
             elif yf and not yt:
                 cur = cur[cur["season_end"] >= yf]
 
-            st.metric("MVP entries", len(cur))
             if cur.empty:
                 st.warning("No MVPs matched your filters.")
             else:
+                # Display "athlete name, school" list in place of the count metric
+                names = []
+                for _, r in cur.iterrows():
+                    nm = str(r["name"]).strip()
+                    sch = str(r["school"]).strip() if pd.notna(r["school"]) and str(r["school"]).strip() else ""
+                    names.append(f"{nm}, {sch}" if sch else nm)
+                st.caption("MVPs")
+                st.markdown("\n".join([f"- {s}" for s in sorted(set(names))]))
+                # Then show the table as-is
                 show_table(cur.sort_values(["season_end","gender","scope"])[["gender","scope","season_label","name","school","category"]])
             st.stop()
 
@@ -1205,11 +1220,7 @@ with tab1:
                 winners = ", ".join(sorted(last_hits["name"].unique()))
                 metric_row([("Year", str(last_year)), ("Winner(s)", winners)])
 
-                # Timeline for sweep years
-                sweep_years_df = sweeps[["year"]].copy()
-                timeline_chart = plot_timeline_year_counts(sweep_years_df.rename(columns={"year":"year"}), title="Years with a full sweep")
-                if timeline_chart is not None:
-                    st.altair_chart(timeline_chart, use_container_width=True)
+                # (Per request) No bar chart visualization for sweeps
 
                 detail = cur[cur["year"] == last_year]
                 detail = detail.merge(last_hits[["year","meet","gender","name"]], on=["year","meet","gender","name"], how="inner")
@@ -1313,7 +1324,7 @@ with tab1:
                 )
                 st.stop()
 
-            # All-time list view with Rank + Location
+            # All-time list view with Rank + Location (Rank as integer-like left-aligned string)
             show_alltime_table(res, cols=["location"])
             st.stop()
 
@@ -1437,7 +1448,17 @@ with tab4:
 
         cur = mvps_df[(mvps_df["scope"] == scope_pick) & (mvps_df["gender"] == gender_pick)]
         cur = cur[cur["season_end"] >= since_year].sort_values(["season_end"])
-        st.metric("MVP entries", len(cur))
+        # Show "athlete name, school" list (no numeric metric)
+        if cur.empty:
+            st.info("No MVP rows found for the current filters.")
+        else:
+            names = []
+            for _, r in cur.iterrows():
+                nm = str(r["name"]).strip()
+                sch = str(r["school"]).strip() if pd.notna(r["school"]) and str(r["school"]).strip() else ""
+                names.append(f"{nm}, {sch}" if sch else nm)
+            st.caption("MVPs")
+            st.markdown("\n".join([f"- {s}" for s in sorted(set(names))]))
         show_table(cur[["gender","scope","season_label","name","school"]])
 
 # ----------------------------
