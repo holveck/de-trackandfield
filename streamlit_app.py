@@ -35,7 +35,11 @@ MEETS: Dict[str, set] = {
     "Meet of Champions": {"moc", "meet of champs", "meet of champion"},
     "New Castle County": {"ncc", "new castle", "new castle co"},
     "Henlopen Conference": {"henlopen"},
-    "Indoor State Championship": {"indoor", "indoor state", "state indoor", "indoor championship"},
+    "Indoor State Championship": {
+        "indoor", "indoor state", "state indoor", "indoor championship",
+        "indoor state championship",             # singular (already implied by key)
+        "indoor state championships"             # NEW: plural
+    },
 }
 MEET_CANONICAL: Dict[str, str] = {}
 for canonical, synonyms in MEETS.items():
@@ -415,25 +419,36 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     }
     low = q.lower()
 
-    # intents
+   # intents
     if re.search(r"\bhow many\b.*\b(championships?|titles?)\b", low):
         out["intent"] = "count_titles"
         if "state" in low:   out["scope"] = "state"
         if "indoor" in low:  out["scope"] = "indoor"
         if "outdoor" in low: out["scope"] = "outdoor"
+
     if "mvp" in low or "most valuable" in low:
         out["intent"] = "mvp_lookup"
         if "indoor" in low:          out["scope"] = "indoor"
         elif "outdoor" in low:       out["scope"] = "outdoor"
         elif "cross country" in low: out["scope"] = "cross country"
-    # leaderboard intent
-    if re.search(r"\bmost\b.*\b(win|wins|titles|races)\b", low) or re.search(r"\btop\s+\d+\b", low):
+
+    # NEW: leaderboard intent – also recognize "won"
+    if re.search(r"\b(most|record)\b.*\b(win|wins|won|titles?|races?)\b", low) or re.search(r"\btop\s+\d+\b", low):
         out["intent"] = "leaderboard_wins"
+
+    # keep 'top N' capture
     m_top = re.search(r"\btop\s+(\d+)\b", low)
-    if m_top: out["top_n"] = max(1, int(m_top.group(1)))
+    if m_top:
+        out["top_n"] = max(1, int(m_top.group(1)))
+
+    # NEW: if it's a "who ... most" type question without explicit top N, default to Top-1
+    if out["intent"] == "leaderboard_wins" and not m_top and re.search(r"\bwho\b", low) and re.search(r"\bmost\b", low):
+        out["top_n"] = 1
+
+    # If they mention "races", constrain to track events
     if "race" in low or "races" in low:
         out["track_only"] = True
-
+        
     # year range
     yf, yt = _extract_year_range(q)
     out["year_from"], out["year_to"] = yf, yt
@@ -670,26 +685,26 @@ with tab1:
 
         # ---- Leaderboard intent: "Who has won the most …" ----
         if f_multi.get("intent") == "leaderboard_wins":
-            lowp = f_multi["raw"].lower()
-            if ("state" in lowp) and ("indoor" not in lowp) and ("outdoor" not in lowp) and not f_multi["meets"]:
-                f_multi["meets"] = list(STATE_MEETS_ALL)
-            if not f_multi["schools"] and KNOWN_SCHOOLS:
-                lowq = f_multi["raw"].lower()
-                for s in KNOWN_SCHOOLS:
-                    if isinstance(s,str) and s.lower() in lowq:
-                        f_multi["schools"].append(s)
+            ...
             lb = leaderboard_wins(df, f_multi)
-            if lb.empty:
-                st.error("No matching winners found for your leaderboard filters.")
-                with st.expander("Detected filters"): st.json(f_multi)
-            else:
-                title = "Top winners"
-                if f_multi["meets"]:   title += f" — {', '.join(f_multi['meets'])}"
-                if f_multi["events"]:  title += f" | Events: {', '.join(sorted(f_multi['events']))}"
-                st.subheader(title)
-                st.dataframe(lb.reset_index(drop=True), use_container_width=True)
-            st.stop()
 
+            # NEW: if Top-1, show a simple result card
+            if f_multi.get("top_n", 10) == 1 and not lb.empty:
+                row = lb.iloc[0]
+                title_bits = []
+                if f_multi["genders"]:
+                    title_bits.append("/".join([g.title() for g in f_multi["genders"]]))
+                if f_multi["events"]:
+                    title_bits.append(", ".join(sorted(f_multi["events"])))
+                if f_multi["meets"]:
+                    title_bits.append(", ".join(f_multi["meets"]))
+                title_text = " — ".join([b for b in title_bits if b])
+
+                st.success(
+                    f"**Most wins {('— ' + title_text) if title_text else ''}**\n\n"
+                    f"🏆 **{row['name']}** — {row['school']} — *{row['gender'].title()}* — **{int(row['wins'])} wins**"
+                )
+                st.stop()
         # ---- Champions multi-condition fallback ----
         low = f_multi["raw"].lower()
         if ("state" in low) and ("indoor" not in low) and ("outdoor" not in low) and not f_multi["meets"]:
