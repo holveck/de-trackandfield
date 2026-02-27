@@ -4,16 +4,25 @@
 #
 # Bundled data:
 #   • Champions workbook: "Delaware Track and Field Supersheet (6).xlsx"
-#   • All-time lists workbook: "Personal All-Time List.xlsx"
+#   • Outdoor All-time lists workbook: "Personal All-Time List.xlsx"
+#   • (Optional) Indoor All-time lists workbook candidates:
+#       - "Personal All-Time List (Indoor).xlsx"
+#       - "Personal All-Time List - Indoor.xlsx"
+#       - "Personal All-Time List_Indoor.xlsx"
+#       - "Indoor Personal All-Time List.xlsx"
 #
 # New in this version:
-#   • First-sheet state records parser (events in G/H; boys A–F; girls I–N; relay structure supported)
-#   • "🏅 State Records" tab with per-event cards (Boys/Girls) + full table
-#   • Queries with "state records" or "outdoor state records" use the first sheet
-#   • PR/PB/personal best/record/fastest time queries use best mark from all-time per-event sheets
-#   • Leaderboard top-1 card simplified: only "Athlete — School" + wins
+#   • Robust state-records parser with numeric event normalization (100.0 → 100)
+#   • Season-aware "🏅 State Records" routing (Outdoor default; Indoor if asked & available)
+#   • "🏅 State Records" tab lists events as whole numbers
+#   • Queries like “What is the girls 200 state record?” resolve correctly
 #
 # Prior improvements retained:
+#   • First-sheet state records parser (events in G/H; boys A–F; girls I–N; relay structure supported)
+#   • "🏅 State Records" tab with per-event cards (Boys/Girls) + full table
+#   • Queries with "state records" use the first sheet
+#   • PR/PB/personal best/record/fastest time queries use best mark from all-time per-event sheets
+#   • Leaderboard top-1 card simplified: only "Athlete — School" + wins
 #   • Edit filters expander; all-time rank as integer-like string; include Location; reduced example chips
 #   • Last-win timeline (sweep charts removed), MVP list output, Athlete Profiles stacked chart by scope
 
@@ -464,6 +473,38 @@ def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
     out = out[~out["name"].astype(str).str.lower().str.contains(r"^wind\s*reading$", regex=True, na=False)]
     return out.reset_index(drop=True)
 
+# ---- New: event normalization helper for state-records ----
+def normalize_event_text_for_records(raw) -> Optional[str]:
+    """
+    Normalize event labels from the state-records first sheet:
+    - If numeric (int/float), cast to whole number string when integer-like (e.g., 100, 200).
+    - Strip trailing '.0' from text (e.g., '100.0' -> '100').
+    - Map to canonical event labels where possible.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        f = float(raw)
+        if math.isfinite(f) and f.is_integer():
+            s = str(int(f))
+        else:
+            s = str(raw)
+    else:
+        s = str(raw).strip()
+
+    if re.fullmatch(r"\d+\.0", s):
+        s = s[:-2]
+
+    ev = canonical_event(s, None)
+    if ev:
+        return ev
+
+    maybe = normalize_event_label(s)
+    if maybe:
+        return canonical_event(maybe, None) or maybe
+
+    return s
+
 @st.cache_data(show_spinner=False)
 def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
     """
@@ -492,10 +533,14 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
     def clean_txt(v):
         return None if v in (None, "") else str(v).strip()
 
-    def current_event_from_cells(g, h, last_event):
-        # Prefer right cell if present, else left; fall back to last_event
-        ev = clean_txt(h) or clean_txt(g) or last_event
-        return ev
+    def current_event_from_cells(g_raw, h_raw, last_event):
+        """
+        Prefer right cell (H) if present, else left (G); if neither present, use last_event.
+        Normalize using normalize_event_text_for_records to ensure whole numbers + canonical labels.
+        """
+        ev_raw = h_raw if h_raw not in (None, "") else g_raw
+        ev_norm = normalize_event_text_for_records(ev_raw)
+        return ev_norm or last_event
 
     def is_relay_event(ev_canon: str) -> bool:
         return ev_canon in EVENT_GROUPS["relays"]
@@ -505,21 +550,21 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
     rows_out = []
     last_event = None
     for r in range(1, ws.max_row + 1):
-        # Read center columns for event
-        g_val = ws.cell(row=r, column=7).value   # G
-        h_val = ws.cell(row=r, column=8).value   # H
-        last_event = current_event_from_cells(g_val, h_val, last_event)
+        # Read center columns for event (raw values)
+        g_raw = ws.cell(row=r, column=7).value   # G
+        h_raw = ws.cell(row=r, column=8).value   # H
+        last_event = current_event_from_cells(g_raw, h_raw, last_event)
         if not last_event:
             continue
 
-        ev_canon = canonical_event(last_event, None) or last_event
+        ev_canon = normalize_event_text_for_records(last_event) or str(last_event)
 
         # Boys side (A-F)
         b_cols = [ws.cell(row=r, column=c).value for c in range(1, 7)]
         # Girls side (I-N)
         g_cols = [ws.cell(row=r, column=c).value for c in range(9, 15)]
 
-        # Skip obvious header rows (if boys/girls time cell looks like header)
+        # Skip obvious header rows
         b_time = clean_txt(b_cols[0])
         g_time = clean_txt(g_cols[0])
         if (b_time and b_time.lower() in header_like) or (g_time and g_time.lower() in header_like):
@@ -528,18 +573,18 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
         relay = is_relay_event(ev_canon)
 
         def add_record(side_cols, gender_label: str):
-            if not side_cols: 
+            if not side_cols:
                 return
             time_mark = clean_txt(side_cols[0])
             if not time_mark:
-                return  # no record in this row for this side
+                return
             if relay:
                 school = clean_txt(side_cols[1])
                 athletes = clean_txt(side_cols[2])
                 meet = clean_txt(side_cols[3])
                 location = clean_txt(side_cols[4])
                 date = side_cols[5]
-                name = school  # align with pattern: use school as display name for relays
+                name = school  # for relays, use school as display name
             else:
                 name = clean_txt(side_cols[1])
                 school = clean_txt(side_cols[2])
@@ -561,7 +606,6 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
                 "ingested_at": pd.Timestamp.utcnow().isoformat(),
             })
 
-        # Add from boys and girls if present
         add_record(b_cols, "BOYS")
         add_record(g_cols, "GIRLS")
 
@@ -569,9 +613,10 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
         return pd.DataFrame(columns=["gender","event","mark","name","school","athletes","meet","location","year"])
 
     df = pd.DataFrame.from_records(rows_out)
-    # Final canonicalization pass for event
+    # Final canonicalization + ensure no trailing .0
     df["event"] = df["event"].apply(lambda e: canonical_event(str(e), None) or str(e))
-    # Keep tidy order
+    df["event"] = df["event"].astype(str).str.replace(r"\.0$", "", regex=True)
+
     cols = ["gender","event","mark","name","school","athletes","meet","location","year","source_name","ingested_at"]
     df = df[cols]
     return df.reset_index(drop=True)
@@ -783,9 +828,13 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         if out["intent"] != "personal_record":
             out["intent"] = "leaderboard_wins"
 
-    # State Records (outdoor)
-    if re.search(r"\bstate\s+records?\b", low) or re.search(r"\boutdoor\s+state\s+records?\b", low):
+    # State Records (season-aware; default to outdoor at use-site)
+    if re.search(r"\bstate\s+records?\b", low) or re.search(r"\b(indoor|outdoor)\s+state\s+records?\b", low):
         out["intent"] = "state_records_lookup"
+        if "indoor" in low:
+            out["scope"] = "indoor"
+        elif "outdoor" in low:
+            out["scope"] = "outdoor"
 
     # Last time
     if re.search(r"\bwhen was the last time\b.*\bwon\b", low) or re.search(r"\bmost recent\b.*\bwin\b", low):
@@ -853,9 +902,11 @@ def apply_multi_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.Dat
     if f["genders"]:
         cur = cur[cur["gender"].isin(set(f["genders"]))]
     if f["meets"]:
-        cur = cur[cur["meet"].isin(set(f["meets"]))]
+        cur = cur[cur["meet"].isin(set(f["meets"]))]\
+    
     if f["events"]:
-        cur = cur[cur["event"].isin(set(f["events"]))]
+        cur = cur[cur["event"].isin(set(f["events"]))]\
+    
     if f["schools"]:
         mask = pd.Series(False, index=cur.index)
         for s in f["schools"]:
@@ -915,6 +966,14 @@ APP_DIR = Path(__file__).parent
 BUNDLED_XLSX_PATH = APP_DIR / "Delaware Track and Field Supersheet (6).xlsx"
 BUNDLED_ALLTIME_XLSX_PATH = APP_DIR / "Personal All-Time List.xlsx"
 
+# Optional: Indoor all-time + state records workbook (if you add one later)
+INDOOR_ALLTIME_CANDIDATES = [
+    "Personal All-Time List (Indoor).xlsx",
+    "Personal All-Time List - Indoor.xlsx",
+    "Personal All-Time List_Indoor.xlsx",
+    "Indoor Personal All-Time List.xlsx",
+]
+
 with st.sidebar:
     st.header("Data sources")
     if not BUNDLED_XLSX_PATH.exists():
@@ -936,8 +995,14 @@ with st.sidebar:
             df = None; mvps_df = None; KNOWN_SCHOOLS = set(); KNOWN_ATHLETES = set()
 
     st.header("All‑Time / Records")
+    # ----------------------------
+    # All‑Time / Records (Outdoor by default, optional Indoor)
+    # ----------------------------
     alltime_df = None
     state_records_df = None
+    alltime_df_indoor = None
+    state_records_df_indoor = None
+
     if not BUNDLED_ALLTIME_XLSX_PATH.exists():
         st.warning(f"All‑time workbook not found at:\n{BUNDLED_ALLTIME_XLSX_PATH}")
     else:
@@ -946,12 +1011,34 @@ with st.sidebar:
                 at_bytes = f.read()
             alltime_df = load_alltime(at_bytes, "xlsx")
             state_records_df = load_state_records_first_sheet(at_bytes)
-            st.success(f"All‑time rows: {len(alltime_df):,}")
-            st.success(f"State records: {0 if state_records_df is None else len(state_records_df):,}")
+            st.success(f"All‑time rows (Outdoor): {len(alltime_df):,}")
+            st.success(f"State records (Outdoor): {0 if state_records_df is None else len(state_records_df):,}")
         except Exception as ex:
-            st.error("Error parsing all‑time/state records workbook.")
+            st.error("Error parsing outdoor all‑time/state records workbook.")
             st.exception(ex)
             alltime_df = None; state_records_df = None
+
+    # Try to find an Indoor workbook too (optional)
+    INDOOR_ALLTIME_XLSX_PATH = None
+    for cand in INDOOR_ALLTIME_CANDIDATES:
+        p = APP_DIR / cand
+        if p.exists():
+            INDOOR_ALLTIME_XLSX_PATH = p
+            break
+
+    if INDOOR_ALLTIME_XLSX_PATH:
+        try:
+            with open(INDOOR_ALLTIME_XLSX_PATH, "rb") as f:
+                at_in_bytes = f.read()
+            alltime_df_indoor = load_alltime(at_in_bytes, "xlsx")
+            state_records_df_indoor = load_state_records_first_sheet(at_in_bytes)
+            st.success(f"All‑time rows (Indoor): {len(alltime_df_indoor):,}")
+            st.success(f"State records (Indoor): {0 if state_records_df_indoor is None else len(state_records_df_indoor):,}")
+        except Exception as ex:
+            st.warning("Indoor all‑time/state records workbook detected but failed to parse.")
+            st.exception(ex)
+            alltime_df_indoor = None
+            state_records_df_indoor = None
 
 # Tabs
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
@@ -992,7 +1079,7 @@ def _set_q_in_url(qval: str):
 # ----------------------------
 with tab1:
     st.subheader("Natural-language Q&A")
-    st.caption("Ask about champions, leaderboards, MVPs, last wins, **state records**, **PR/PB**, and all‑time lists.")
+    st.caption("Ask about champions, leaderboards, MVPs, last wins, **state records** (Outdoor by default; add 'indoor' to switch), **PR/PB**, and all‑time lists.")
 
     if "q_prefill" not in st.session_state or not st.session_state["q_prefill"]:
         url_q = _get_q_from_url()
@@ -1003,7 +1090,7 @@ with tab1:
         "Who won the boys 200 at the indoor state meet in 2026?",
         "How many state championships did Juliana Balon win?",
         "Who has won the most New Castle County Championships races?",
-        "Who was the last girl to win the 55, 55H and 200 at the indoor track and field state meet?"
+        "What is the girls 200 state record?",
     ]
     st.caption("Quick examples:")
     ex_cols = st.columns(2)
@@ -1288,25 +1375,41 @@ with tab1:
                 show_table(lb.reset_index(drop=True)[["gender","name","school","wins"]])
             st.stop()
 
-        # ---- State Records (first sheet) ----
+        # ---- State Records (first sheet; season-aware) ----
         if f_multi.get("intent") == "state_records_lookup":
-            if state_records_df is None or state_records_df.empty:
+            scope = (f_multi.get("scope") or "").lower()
+            use_df = None
+            season_label = "Outdoor"
+            if scope == "indoor":
+                if 'state_records_df_indoor' in globals() and state_records_df_indoor is not None and not state_records_df_indoor.empty:
+                    use_df = state_records_df_indoor.copy()
+                    season_label = "Indoor"
+                else:
+                    st.info("Indoor state records requested, but the Indoor workbook isn't loaded yet. Showing Outdoor by default.")
+                    use_df = state_records_df.copy() if state_records_df is not None else None
+            else:
+                use_df = state_records_df.copy() if state_records_df is not None else None
+
+            if use_df is None or use_df.empty:
                 st.error("State records sheet not loaded or not parseable.")
                 st.stop()
-            cur = state_records_df.copy()
+
+            cur = use_df.copy()
             if f_multi["genders"]:
                 cur = cur[cur["gender"].isin(f_multi["genders"])]
             if f_multi["events"]:
                 cur = cur[cur["event"].isin(f_multi["events"])]
+
             if cur.empty:
                 st.warning("No state-record entries matched your filters. Try specifying gender and event (e.g., 'Girls 400 state record').")
                 st.stop()
+
             cur = cur.sort_values(["gender","event"])
-            # If single, show card; otherwise show table
+
             if len(cur) == 1:
                 r0 = cur.iloc[0]
                 info_card(
-                    title=f"{str(r0['gender']).title()} — {r0['event']} (State Record)",
+                    title=f"{season_label} — {str(r0['gender']).title()} — {r0['event']} (State Record)",
                     lines=[
                         ("Athlete/Team", str(r0["name"] or r0["school"] or "")),
                         ("Time/Mark", str(r0["mark"])),
@@ -1338,7 +1441,7 @@ with tab1:
             name_norm = normalize_name(athlete)
             for ev in events:
                 sub = alltime_df[(alltime_df["event"] == ev) & (alltime_df["gender"].isin(genders))].copy()
-                if sub.empty: 
+                if sub.empty:
                     continue
                 sub["name_norm"] = sub["name"].astype(str).apply(normalize_name)
                 sub = sub[sub["name_norm"] == name_norm]
@@ -1588,33 +1691,48 @@ with tab5:
             c2.metric("Min champ year", int(df["year"].min()))
             c3.metric("Max champ year", int(df["year"].max()))
             c4.metric("MVP rows", 0 if (mvps_df is None) else len(mvps_df))
-            c5.metric("All‑time rows", 0 if (alltime_df is None) else len(alltime_df))
-            c6.metric("State-record rows", 0 if (state_records_df is None) else len(state_records_df))
+            c5.metric("All‑time rows (Outdoor)", 0 if (alltime_df is None) else len(alltime_df))
+            c6.metric("State‑record rows (Outdoor)", 0 if (state_records_df is None) else len(state_records_df))
         except Exception:
             st.metric("Champion rows", f"{len(df):,}")
         st.write("Meets (champions):", sorted(df["meet"].unique()))
         st.write("Events (sample):", sorted(df["event"].unique())[:16])
         if alltime_df is not None and not alltime_df.empty:
-            st.write("All‑time events:", sorted(alltime_df["event"].dropna().unique().tolist())[:20])
+            st.write("All‑time events (Outdoor):", sorted(alltime_df["event"].dropna().unique().tolist())[:20])
         if state_records_df is not None and not state_records_df.empty:
-            st.write("State‑record events:", sorted(state_records_df["event"].dropna().unique().tolist())[:20])
+            st.write("State‑record events (Outdoor):", sorted(state_records_df["event"].dropna().unique().tolist())[:20])
+        if alltime_df_indoor is not None and not alltime_df_indoor.empty:
+            st.write("All‑time events (Indoor):", sorted(alltime_df_indoor["event"].dropna().unique().tolist())[:20])
+        if state_records_df_indoor is not None and not state_records_df_indoor.empty:
+            st.write("State‑record events (Indoor):", sorted(state_records_df_indoor["event"].dropna().unique().tolist())[:20])
         st.write("Champions sample:")
         show_table(df.head(20))
 
 # ----------------------------
-# State Records (cosmetic tab)
+# State Records (season-aware tab)
 # ----------------------------
 with tab6:
-    st.subheader("State Records (Outdoor)")
-    if state_records_df is None or state_records_df.empty:
-        st.info("State records sheet not loaded or empty.")
+    st.subheader("State Records")
+
+    # Season switcher (Outdoor default, Indoor only if available)
+    has_indoor = 'state_records_df_indoor' in globals() and state_records_df_indoor is not None and not state_records_df_indoor.empty
+    season = st.radio("Season", options=(["Outdoor", "Indoor"] if has_indoor else ["Outdoor"]), horizontal=True, index=0)
+
+    cur_df = state_records_df if season == "Outdoor" else state_records_df_indoor
+    if cur_df is None or cur_df.empty:
+        st.info(f"State records sheet not loaded or empty for {season}.")
     else:
-        events_sorted = sorted(state_records_df["event"].dropna().unique().tolist())
+        # Guarantee display events are whole-number when appropriate
+        cur_df = cur_df.copy()
+        cur_df["event"] = cur_df["event"].astype(str).str.replace(r"\.0$", "", regex=True)
+
+        events_sorted = sorted(cur_df["event"].dropna().unique().tolist())
         c1, c2 = st.columns([0.6, 0.4])
         ev_pick = c1.selectbox("Event", options=["(choose event)"] + events_sorted, index=0)
         gender_opts = ["Both", "Girls", "Boys"]
         g_pick = c2.radio("Gender", options=gender_opts, horizontal=True, index=0)
-        cur = state_records_df.copy()
+
+        cur = cur_df.copy()
         if ev_pick != "(choose event)":
             cur = cur[cur["event"] == ev_pick]
         if g_pick == "Girls":
@@ -1631,7 +1749,7 @@ with tab6:
                 r = boys.iloc[0]
                 with c_b:
                     info_card(
-                        title=f"**Boys — {r['event']}**",
+                        title=f"**Boys — {r['event']} ({season})**",
                         lines=[
                             ("Time/Mark", str(r["mark"])),
                             ("Athlete/Team", str(r["name"] or r["school"] or "")),
@@ -1645,7 +1763,7 @@ with tab6:
                 r = girls.iloc[0]
                 with c_g:
                     info_card(
-                        title=f"**Girls — {r['event']}**",
+                        title=f"**Girls — {r['event']} ({season})**",
                         lines=[
                             ("Time/Mark", str(r["mark"])),
                             ("Athlete/Team", str(r["name"] or r["school"] or "")),
@@ -1657,7 +1775,7 @@ with tab6:
                     )
             st.divider()
 
-        st.caption("Full state records table")
+        st.caption(f"Full state records table — {season}")
         show_table(cur[["gender","event","mark","name","school","athletes","meet","location","year"]])
 
 # ----------------------------
