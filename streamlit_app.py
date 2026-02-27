@@ -23,7 +23,8 @@
 #   • Title count: single total metric + bar chart by year (no per-gender banners)
 #   • MVP lookup: show "athlete name, school" list instead of numeric metric, then table
 #   • Athlete Profiles: "All meets" default first; stacked titles-by-year chart reflecting current scope with provided colors
-#   • "Show athlete profile" deep-link beneath applicable Q&A results; Athlete tab preselects via ?athlete=...
+#   • Leaderboard top-1 card simplified: only "Athlete — School" and win total (no gender/context)
+#   • Removed "Show athlete profile" link from Q&A results
 
 import io
 import re
@@ -31,7 +32,6 @@ import math
 import difflib
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
-from urllib.parse import quote_plus
 
 import pandas as pd
 import streamlit as st
@@ -576,12 +576,9 @@ def show_alltime_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     st.dataframe(cur, use_container_width=True, hide_index=True)
 
 def top1_card(name: str, school: str, gender: str, wins: int, context: str = ""):
+    # Simplified: Only show Athlete — School + total wins (no gender/context line)
     with st.container(border=True):
         st.markdown(f"**{name}** — {school}")
-        parts = [f"Gender: **{gender.title()}**"]
-        if context:
-            parts.append(context)
-        st.caption(" • ".join(parts))
         st.markdown(f"🏆 **{int(wins)}** wins")
 
 def info_card(title: str, lines: List[Tuple[str, str]]):
@@ -886,7 +883,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 ])
 
 # ----------------------------
-# Helpers for deep-linking & profile link
+# Helpers for deep-linking (retain Q deep-link; no profile link)
 # ----------------------------
 def _get_q_from_url():
     try:
@@ -928,13 +925,6 @@ def _get_athlete_from_url():
         except Exception:
             pass
     return ""
-
-def show_profile_link(name: Optional[str]):
-    """Renders a deep-link that preselects the athlete on the Athlete Profiles tab."""
-    if not name or not isinstance(name, str):
-        return
-    href = f"?athlete={quote_plus(name)}"
-    st.markdown(f"[Show athlete profile]({href})")
 
 # ----------------------------
 # Q&A
@@ -1113,9 +1103,6 @@ with tab1:
                 with c3: st.caption("By year");  show_table(rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
                 st.caption("Title rows (relays excluded)")
                 show_table(rows[["gender","year","meet","event","class","school","mark"]])
-
-            # Link to athlete profile
-            show_profile_link(athlete)
             st.stop()
 
         # ---- MVP lookup ----
@@ -1205,8 +1192,6 @@ with tab1:
             if timeline_chart is not None:
                 st.altair_chart(timeline_chart, use_container_width=True)
 
-            show_profile_link(str(r0["name"]))
-
             if len(latest_rows) > 1:
                 st.caption("All matching winners in that year")
                 show_table(latest_rows[["gender","year","meet","event","name","school","class","mark"]])
@@ -1261,11 +1246,6 @@ with tab1:
                 detail = detail.merge(last_hits[["year","meet","gender","name"]], on=["year","meet","gender","name"], how="inner")
                 detail = detail.sort_values(["gender","meet","name","event"])
                 show_table(detail[["gender","year","meet","name","event","school","class","mark"]])
-
-                # If exactly one winner, show profile link
-                if len(last_hits["name"].unique()) == 1:
-                    show_profile_link(last_hits["name"].iloc[0])
-
             st.stop()
 
         # ---- Leaderboard (who has won the most...) ----
@@ -1277,15 +1257,10 @@ with tab1:
 
             if f_multi.get("top_n", 10) == 1 and not lb.empty:
                 row = lb.iloc[0]
-                bits = []
-                if f_multi["genders"]: bits.append("/".join([g.title() for g in f_multi["genders"]]))
-                if f_multi["events"]:  bits.append(", ".join(sorted(f_multi["events"])))
-                if f_multi["meets"]:   bits.append(", ".join(f_multi["meets"]))
-                context = " — ".join([b for b in bits if b])
-                top1_card(name=row["name"], school=row["school"], gender=row["gender"], wins=int(row["wins"]), context=context)
+                # Simplified top-1 card: only athlete — school and wins
+                top1_card(name=row["name"], school=row["school"], gender=row["gender"], wins=int(row["wins"]))
 
-                show_profile_link(str(row["name"]))
-
+                # Below card: that athlete’s wins table with full context
                 cur = apply_multi_filters(df, f_multi)
                 wins_rows = cur[
                     (cur["name"] == row["name"]) &
@@ -1364,7 +1339,6 @@ with tab1:
                         ("Meet", str(r0["meet"] or "")),
                     ],
                 )
-                show_profile_link(str(r0["name"]))
                 st.stop()
 
             # All-time list view with Rank + Location
@@ -1396,7 +1370,6 @@ with tab1:
                         ("Mark", str(row["mark"])),
                     ],
                 )
-                show_profile_link(str(row["name"]))
             show_table(result[["gender","event","meet","year","name","class","school","mark"]])
 
 # ----------------------------
@@ -1528,7 +1501,7 @@ with tab3:
                     ).properties(title="Titles by year (stacked by meet)", width="container")
                     st.altair_chart(chart, use_container_width=True)
 
-            # --- Existing breakdowns for CURRENT scope ---
+            # --- Breakdown tables for CURRENT scope ---
             if any(c for _, c, _ in collected):
                 # Combine rows that matched the current scope for the tables
                 all_rows = pd.concat([r for _, c, r in collected if c > 0], ignore_index=True)
@@ -1591,7 +1564,7 @@ with tab5:
         st.write("Events (sample):", sorted(df["event"].unique())[:16])
         if alltime_df is not None and not alltime_df.empty:
             st.write("All‑time events:", sorted(alltime_df["event"].dropna().unique().tolist())[:20])
-        if mvps_df is not None and not mvps_df.empty:
+        if mvps_df is not None and not alltime_df is None and not mvps_df.empty:
             st.write("MVP scopes:", sorted(mvps_df["scope"].unique().tolist()))
             st.write("MVP seasons range:", f"{int(mvps_df['season_end'].min())} → {int(mvps_df['season_end'].max())}")
         st.write("Champions sample:")
