@@ -17,14 +17,17 @@
 #   • "🏅 State Records" tab lists events as whole numbers
 #   • Queries like “What is the girls 200 state record?” resolve correctly
 #
+# Tweaks in this patch:
+#   • Year values show as whole numbers (e.g., 2017) in record responses
+#   • “Athlete/Team” → “Athlete(s)” in cards/responses
+#   • Relays: map athletes to the name field; keep school in school field
+#   • State Records tab: remove athletes column from the table
+#   • All tables: capitalize the first letter of each header label (e.g., Gender)
+#
 # Prior improvements retained:
 #   • First-sheet state records parser (events in G/H; boys A–F; girls I–N; relay structure supported)
-#   • "🏅 State Records" tab with per-event cards (Boys/Girls) + full table
-#   • Queries with "state records" use the first sheet
 #   • PR/PB/personal best/record/fastest time queries use best mark from all-time per-event sheets
 #   • Leaderboard top-1 card simplified: only "Athlete — School" + wins
-#   • Edit filters expander; all-time rank as integer-like string; include Location; reduced example chips
-#   • Last-win timeline (sweep charts removed), MVP list output, Athlete Profiles stacked chart by scope
 
 import io
 import re
@@ -579,12 +582,13 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
             if not time_mark:
                 return
             if relay:
+                # Map relay athletes to the NAME field; keep SCHOOL in the SCHOOL field
                 school = clean_txt(side_cols[1])
                 athletes = clean_txt(side_cols[2])
+                name = athletes  # <-- key change
                 meet = clean_txt(side_cols[3])
                 location = clean_txt(side_cols[4])
                 date = side_cols[5]
-                name = school  # for relays, use school as display name
             else:
                 name = clean_txt(side_cols[1])
                 school = clean_txt(side_cols[2])
@@ -616,6 +620,10 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
     # Final canonicalization + ensure no trailing .0
     df["event"] = df["event"].apply(lambda e: canonical_event(str(e), None) or str(e))
     df["event"] = df["event"].astype(str).str.replace(r"\.0$", "", regex=True)
+
+    # Make sure year dtype is int-like where possible (prevents 2017.0 artifacts)
+    if "year" in df.columns:
+        df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
 
     cols = ["gender","event","mark","name","school","athletes","meet","location","year","source_name","ingested_at"]
     df = df[cols]
@@ -669,6 +677,14 @@ def _reorder_gender_first(df: pd.DataFrame) -> pd.DataFrame:
         return df[cols]
     return df
 
+def _pretty_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Capitalize first letter of each header label. (e.g., 'gender' -> 'Gender')
+    """
+    df = df.copy()
+    df.columns = [c[:1].upper() + c[1:] if c else c for c in df.columns]
+    return df
+
 def show_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     if df is None:
         return
@@ -678,6 +694,7 @@ def show_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
         cur = cur[keep]
     cur = _format_gender_values(cur)
     cur = _reorder_gender_first(cur)
+    cur = _pretty_headers(cur)
     st.dataframe(cur, use_container_width=True, hide_index=True)
 
 def _format_rank_as_string(df: pd.DataFrame) -> pd.DataFrame:
@@ -702,6 +719,7 @@ def show_alltime_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     keep = [c for c in default_cols if c in cur.columns]
     cur = cur[keep]
     cur = _format_gender_values(cur)
+    cur = _pretty_headers(cur)
     st.dataframe(cur, use_container_width=True, hide_index=True)
 
 def top1_card(name: str, school: str, gender: str, wins: int, context: str = ""):
@@ -902,11 +920,11 @@ def apply_multi_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.Dat
     if f["genders"]:
         cur = cur[cur["gender"].isin(set(f["genders"]))]
     if f["meets"]:
-        cur = cur[cur["meet"].isin(set(f["meets"]))]\
-    
+        cur = cur[cur["meet"].isin(set(f["meets"]))]
+
     if f["events"]:
-        cur = cur[cur["event"].isin(set(f["events"]))]\
-    
+        cur = cur[cur["event"].isin(set(f["events"]))]
+
     if f["schools"]:
         mask = pd.Series(False, index=cur.index)
         for s in f["schools"]:
@@ -1293,7 +1311,7 @@ with tab1:
             info_card(
                 title=f"{str(r0['gender']).title()} — {r0['event']} — {r0['meet']}",
                 lines=[
-                    ("Year", str(latest_year)),
+                    ("Year", str(int(r0["year"])) if pd.notna(r0["year"]) else ""),  # ensure whole number
                     ("Athlete", str(r0["name"])),
                     ("Time/Mark", str(r0["mark"])),
                     ("School", str(r0["school"])),
@@ -1406,21 +1424,20 @@ with tab1:
 
             cur = cur.sort_values(["gender","event"])
 
-            if len(cur) == 1:
-                r0 = cur.iloc[0]
-                info_card(
-                    title=f"{season_label} — {str(r0['gender']).title()} — {r0['event']} (State Record)",
-                    lines=[
-                        ("Athlete/Team", str(r0["name"] or r0["school"] or "")),
-                        ("Time/Mark", str(r0["mark"])),
-                        ("School", str(r0["school"] or "")),
-                        ("Year", str(r0["year"] or "")),
-                        ("Meet", str(r0["meet"] or "")),
-                        ("Location", str(r0["location"] or "")),
-                    ],
-                )
-            else:
-                show_table(cur[["gender","event","mark","name","school","meet","location","year"]])
+            # Prefer a single best row for clarity (dataset should already be 1 per event+gender)
+            r0 = cur.iloc[0]
+            yr_str = str(int(r0["year"])) if pd.notna(r0["year"]) else ""  # ensure whole number year
+            info_card(
+                title=f"{season_label} — {str(r0['gender']).title()} — {r0['event']} (State Record)",
+                lines=[
+                    ("Athlete(s)", str(r0["name"] or r0["school"] or "")),  # label updated
+                    ("Time/Mark", str(r0["mark"])),
+                    ("School", str(r0["school"] or "")),
+                    ("Year", yr_str),
+                    ("Meet", str(r0["meet"] or "")),
+                    ("Location", str(r0["location"] or "")),
+                ],
+            )
             st.stop()
 
         # ---- Personal Record (PR/PB) ----
@@ -1455,12 +1472,13 @@ with tab1:
                 st.stop()
             if len(outs) == 1:
                 r0 = outs[0]
+                yr_str = str(int(r0["year"])) if pd.notna(r0["year"]) else ""
                 info_card(
                     title=f"{r0['name']} — {r0['event']} (Personal Record)",
                     lines=[
                         ("Time/Mark", str(r0["mark"])),
                         ("School", str(r0["school"] or "")),
-                        ("Year", str(r0["year"] or "")),
+                        ("Year", yr_str),
                         ("Meet", str(r0["meet"] or "")),
                         ("Location", str(r0["location"] or "")),
                     ],
@@ -1515,13 +1533,14 @@ with tab1:
             res = pd.concat(outs, ignore_index=True)
             if len(genders) == 1 and len(events) == 1 and topn == 1 and len(res) >= 1:
                 r0 = res.iloc[0]
+                yr_str = str(int(r0["year"])) if pd.notna(r0["year"]) else ""
                 info_card(
                     title=f"{str(r0['gender']).title()} — {r0['event']} (All‑time best)",
                     lines=[
-                        ("Athlete/Team", str(r0["name"])),
+                        ("Athlete(s)", str(r0["name"])),  # label aligned
                         ("Time/Mark", str(r0["mark"])),
                         ("School", str(r0["school"] or "")),
-                        ("Year", str(r0["year"] or "")),
+                        ("Year", yr_str),
                         ("Meet", str(r0["meet"] or "")),
                     ],
                 )
@@ -1752,11 +1771,11 @@ with tab6:
                         title=f"**Boys — {r['event']} ({season})**",
                         lines=[
                             ("Time/Mark", str(r["mark"])),
-                            ("Athlete/Team", str(r["name"] or r["school"] or "")),
+                            ("Athlete(s)", str(r["name"] or r["school"] or "")),
                             ("School", str(r["school"] or "")),
                             ("Meet", str(r["meet"] or "")),
                             ("Location", str(r["location"] or "")),
-                            ("Year", str(r["year"] or "")),
+                            ("Year", str(int(r["year"])) if pd.notna(r["year"]) else ""),  # whole number
                         ],
                     )
             if not girls.empty:
@@ -1766,17 +1785,19 @@ with tab6:
                         title=f"**Girls — {r['event']} ({season})**",
                         lines=[
                             ("Time/Mark", str(r["mark"])),
-                            ("Athlete/Team", str(r["name"] or r["school"] or "")),
+                            ("Athlete(s)", str(r["name"] or r["school"] or "")),
                             ("School", str(r["school"] or "")),
                             ("Meet", str(r["meet"] or "")),
                             ("Location", str(r["location"] or "")),
-                            ("Year", str(r["year"] or "")),
+                            ("Year", str(int(r["year"])) if pd.notna(r["year"]) else ""),  # whole number
                         ],
                     )
             st.divider()
 
         st.caption(f"Full state records table — {season}")
-        show_table(cur[["gender","event","mark","name","school","athletes","meet","location","year"]])
+        # Remove 'athletes' column from display as requested
+        display_cols = [c for c in ["gender","event","mark","name","school","meet","location","year"] if c in cur.columns]
+        show_table(cur[display_cols])
 
 # ----------------------------
 # All‑Time Lists
