@@ -13,15 +13,17 @@
 #   • Meet/event canonicalization; "state" defaults; strict table cosmetics
 #   • All-time loader parses per-event sheets (Girls/Boys <Event>), handles time & field marks
 #
-# Updates implemented:
+# Updates included:
 #   • Removed intent headers (start results with info cards/tables)
-#   • Added "Edit detected filters" expander (override parser outputs)
-#   • Added Altair timeline for last-win (sweep charts removed per latest request)
-#   • Added synonym: "New Castle County championships"
-#   • All-time tables now show Rank (first number column, integer) + include Location
+#   • "Edit detected filters" expander (override parser outputs)
+#   • Altair timeline for last-win (sweep charts removed)
+#   • Synonym: "New Castle County championships"
+#   • All-time tables show Rank (integer-like string) + include Location
 #   • Reduced quick example chips to four
 #   • Title count: single total metric + bar chart by year (no per-gender banners)
-#   • MVP lookup: show "athlete name, school" list instead of a numeric metric, then table
+#   • MVP lookup: show "athlete name, school" list instead of numeric metric, then table
+#   • Athlete Profiles: "All meets" default first; stacked titles-by-year chart reflecting current scope with provided colors
+#   • "Show athlete profile" deep-link beneath applicable Q&A results; Athlete tab preselects via ?athlete=...
 
 import io
 import re
@@ -29,6 +31,7 @@ import math
 import difflib
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import pandas as pd
 import streamlit as st
@@ -542,7 +545,7 @@ def show_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     st.dataframe(cur, use_container_width=True, hide_index=True)
 
 def _format_rank_as_string(df: pd.DataFrame) -> pd.DataFrame:
-    """Show rank as a left-aligned integer string (e.g., '1', not '1.0')."""
+    """Show rank as a left-aligned integer-like string (e.g., '1', not '1.0')."""
     if "rank" in df.columns:
         s = pd.to_numeric(df["rank"], errors="coerce")
         df["rank"] = s.apply(lambda v: "" if pd.isna(v) else str(int(v)))
@@ -883,45 +886,72 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 ])
 
 # ----------------------------
-# Q&A
+# Helpers for deep-linking & profile link
 # ----------------------------
-with tab1:
-    st.subheader("Natural-language Q&A")
-    st.caption(
-        "Ask questions about state champions, leaderboards, MVPs, sweeps, and all‑time lists."
-    )
-
-    # Deep-linking helpers
-    def _get_q_from_url():
+def _get_q_from_url():
+    try:
+        params = st.query_params
+        if "q" in params:
+            val = params["q"]
+            return val[0] if isinstance(val, list) else val
+    except Exception:
         try:
-            params = st.query_params
+            params = st.experimental_get_query_params()
             if "q" in params:
                 val = params["q"]
                 return val[0] if isinstance(val, list) else val
         except Exception:
-            try:
-                params = st.experimental_get_query_params()
-                if "q" in params:
-                    val = params["q"]
-                    return val[0] if isinstance(val, list) else val
-            except Exception:
-                pass
-        return ""
+            pass
+    return ""
 
-    def _set_q_in_url(qval: str):
+def _set_q_in_url(qval: str):
+    try:
+        st.query_params["q"] = qval
+    except Exception:
         try:
-            st.query_params["q"] = qval
+            st.experimental_set_query_params(q=qval)
         except Exception:
-            try:
-                st.experimental_set_query_params(q=qval)
-            except Exception:
-                pass
+            pass
+
+def _get_athlete_from_url():
+    try:
+        params = st.query_params
+        if "athlete" in params:
+            val = params["athlete"]
+            return val[0] if isinstance(val, list) else val
+    except Exception:
+        try:
+            params = st.experimental_get_query_params()
+            if "athlete" in params:
+                val = params["athlete"]
+                return val[0] if isinstance(val, list) else val
+        except Exception:
+            pass
+    return ""
+
+def show_profile_link(name: Optional[str]):
+    """Renders a deep-link that preselects the athlete on the Athlete Profiles tab."""
+    if not name or not isinstance(name, str):
+        return
+    href = f"?athlete={quote_plus(name)}"
+    st.markdown(f"[Show athlete profile]({href})")
+
+# ----------------------------
+# Q&A
+# ----------------------------
+with tab1:
+    st.subheader("Natural-language Q&A")
+    st.caption("Ask questions about state champions, leaderboards, MVPs, sweeps, and all‑time lists.")
 
     # Prime from URL if empty
     if "q_prefill" not in st.session_state or not st.session_state["q_prefill"]:
         url_q = _get_q_from_url()
         if url_q:
             st.session_state["q_prefill"] = url_q
+    if "athlete_prefill" not in st.session_state or not st.session_state["athlete_prefill"]:
+        url_ath = _get_athlete_from_url()
+        if url_ath:
+            st.session_state["athlete_prefill"] = url_ath
 
     # Quick example chips (reduced to four)
     example_prompts = [
@@ -1064,7 +1094,7 @@ with tab1:
                 scope_label = "State championships" if include_meets == STATE_MEETS_ALL else "Championships (all meets)"
 
             athlete = f_multi["athletes"][0]
-            # Determine which genders to include (if not specified, use guessed; no banners)
+            # Determine genders to include (if unspecified, guess)
             genders_to_check = f_multi["genders"] if f_multi["genders"] else guess_gender_for_name(df, athlete)
             df_scope = df[df["gender"].isin(genders_to_check)]
 
@@ -1072,7 +1102,7 @@ with tab1:
             metric_row([("Titles", str(total_count))])
 
             if total_count > 0:
-                # Bar chart: titles by year (exclude years with zero by definition)
+                # Bar chart: titles by year (exclude zero years)
                 timeline_chart = plot_timeline_year_counts(rows[["year"]].dropna(), title="Titles by year")
                 if timeline_chart is not None:
                     st.altair_chart(timeline_chart, use_container_width=True)
@@ -1083,6 +1113,9 @@ with tab1:
                 with c3: st.caption("By year");  show_table(rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
                 st.caption("Title rows (relays excluded)")
                 show_table(rows[["gender","year","meet","event","class","school","mark"]])
+
+            # Link to athlete profile
+            show_profile_link(athlete)
             st.stop()
 
         # ---- MVP lookup ----
@@ -1121,7 +1154,7 @@ with tab1:
             if cur.empty:
                 st.warning("No MVPs matched your filters.")
             else:
-                # Display "athlete name, school" list in place of the count metric
+                # Show "athlete name, school" list
                 names = []
                 for _, r in cur.iterrows():
                     nm = str(r["name"]).strip()
@@ -1171,6 +1204,8 @@ with tab1:
             timeline_chart = plot_timeline_year_counts(timeline_src, title="Wins by Year (matching your filters)")
             if timeline_chart is not None:
                 st.altair_chart(timeline_chart, use_container_width=True)
+
+            show_profile_link(str(r0["name"]))
 
             if len(latest_rows) > 1:
                 st.caption("All matching winners in that year")
@@ -1226,6 +1261,11 @@ with tab1:
                 detail = detail.merge(last_hits[["year","meet","gender","name"]], on=["year","meet","gender","name"], how="inner")
                 detail = detail.sort_values(["gender","meet","name","event"])
                 show_table(detail[["gender","year","meet","name","event","school","class","mark"]])
+
+                # If exactly one winner, show profile link
+                if len(last_hits["name"].unique()) == 1:
+                    show_profile_link(last_hits["name"].iloc[0])
+
             st.stop()
 
         # ---- Leaderboard (who has won the most...) ----
@@ -1243,6 +1283,8 @@ with tab1:
                 if f_multi["meets"]:   bits.append(", ".join(f_multi["meets"]))
                 context = " — ".join([b for b in bits if b])
                 top1_card(name=row["name"], school=row["school"], gender=row["gender"], wins=int(row["wins"]), context=context)
+
+                show_profile_link(str(row["name"]))
 
                 cur = apply_multi_filters(df, f_multi)
                 wins_rows = cur[
@@ -1322,9 +1364,10 @@ with tab1:
                         ("Meet", str(r0["meet"] or "")),
                     ],
                 )
+                show_profile_link(str(r0["name"]))
                 st.stop()
 
-            # All-time list view with Rank + Location (Rank as integer-like left-aligned string)
+            # All-time list view with Rank + Location
             show_alltime_table(res, cols=["location"])
             st.stop()
 
@@ -1353,6 +1396,7 @@ with tab1:
                         ("Mark", str(row["mark"])),
                     ],
                 )
+                show_profile_link(str(row["name"]))
             show_table(result[["gender","event","meet","year","name","class","school","mark"]])
 
 # ----------------------------
@@ -1396,11 +1440,29 @@ with tab3:
     if df is None:
         st.info("No data loaded.")
     else:
+        # Build the athlete options
         idx = all_athletes_index(df)
-        athlete = st.selectbox("Choose athlete", options=["(type to search)"] + idx["name"].unique().tolist(), index=0)
-        scope = st.radio("Scope", options=["State (Indoor + Division I/II)", "Indoor only", "Outdoor only", "All meets"], horizontal=True)
+        names_list = idx["name"].dropna().unique().tolist()
+        options = ["(type to search)"] + names_list
+
+        # Preselect from URL / session if present (case-insensitive match)
+        prefill_ath = st.session_state.get("athlete_prefill", "")
+        sel_index = 0
+        if prefill_ath:
+            low = prefill_ath.strip().lower()
+            for i, nm in enumerate(names_list, start=1):
+                if isinstance(nm, str) and nm.strip().lower() == low:
+                    sel_index = i
+                    break
+
+        athlete = st.selectbox("Choose athlete", options=options, index=sel_index)
+
+        # Reordered scope options: All meets first (default)
+        scope_options = ["All meets", "State (Indoor + Division I/II)", "Indoor only", "Outdoor only"]
+        scope = st.radio("Scope", options=scope_options, horizontal=True, index=0)
 
         if athlete and athlete != "(type to search)":
+            # Determine included meets based on scope
             if scope == "Indoor only":
                 include_meets = STATE_MEETS_INDOOR; scope_label = "Indoor State Championship"
             elif scope == "Outdoor only":
@@ -1410,18 +1472,65 @@ with tab3:
             else:
                 include_meets = STATE_MEETS_ALL; scope_label = "State (Indoor + Division I/II)"
 
+            # Guess genders (used to pull rows)
             genders = guess_gender_for_name(df, athlete)
+
+            # Titles matching the CURRENT scope (for metrics/tables)
             collected = []
             for g in genders:
                 count, rows = title_count(df[df["gender"] == g], athlete, include_meets=include_meets, include_relays=False)
                 collected.append((g, count, rows))
 
             st.markdown(f"### {athlete} — {scope_label}")
+            # Per-gender totals as metrics (kept)
             cols = st.columns(len(collected) if collected else 1)
             for i, (g, count, rows) in enumerate(collected or []):
                 cols[i].metric(f"{g.title()} titles", int(count))
 
+            # --- Stacked bar chart of titles by year & meet REFLECTING CURRENT SCOPE ---
+            keep_meets_for_colors = [
+                "Division I", "Division II", "Meet of Champions",
+                "New Castle County", "Henlopen Conference", "Indoor State Championship"
+            ]
+            color_range = ["#0000FF", "#434343", "#00ff00", "#9900ff", "#ff9900", "#ff00ff"]
+
+            # Build rows for the athlete across genders, current include_meets only
+            scope_rows_list = []
+            for g in genders:
+                _, scoped_rows = title_count(
+                    df[df["gender"] == g], athlete,
+                    include_meets=include_meets,
+                    include_relays=False
+                )
+                if not scoped_rows.empty:
+                    scope_rows_list.append(scoped_rows)
+
+            if scope_rows_list:
+                scoped_df = pd.concat(scope_rows_list, ignore_index=True)
+                chart_src = scoped_df.dropna(subset=["year", "meet"]).copy()
+                chart_src = chart_src[chart_src["meet"].isin(keep_meets_for_colors)]
+                if not chart_src.empty:
+                    stacked = (
+                        chart_src.groupby(["year","meet"])
+                                 .size()
+                                 .reset_index(name="titles")
+                                 .sort_values(["year","meet"])
+                    )
+                    chart = alt.Chart(stacked).mark_bar().encode(
+                        x=alt.X("year:O", title="Year"),
+                        y=alt.Y("titles:Q", stack="zero", title="Titles"),
+                        color=alt.Color("meet:N",
+                                        scale=alt.Scale(domain=keep_meets_for_colors, range=color_range),
+                                        legend=alt.Legend(title="Meet")),
+                        tooltip=[alt.Tooltip("year:O", title="Year"),
+                                 alt.Tooltip("meet:N", title="Meet"),
+                                 alt.Tooltip("titles:Q", title="Titles")]
+                    ).properties(title="Titles by year (stacked by meet)", width="container")
+                    st.altair_chart(chart, use_container_width=True)
+
+            # --- Existing breakdowns for CURRENT scope ---
             if any(c for _, c, _ in collected):
+                # Combine rows that matched the current scope for the tables
                 all_rows = pd.concat([r for _, c, r in collected if c > 0], ignore_index=True)
                 if not all_rows.empty:
                     c1,c2,c3 = st.columns(3)
