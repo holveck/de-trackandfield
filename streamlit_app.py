@@ -7,14 +7,15 @@
 #   • All-time lists workbook: "Personal All-Time List.xlsx"  (per-event sheets)
 #
 # Highlights:
-#   • NLQ intents: leaderboard, last-time, last-sweep, title-count, MVP lookup, records (all-time)
+#   • NLQ intents: leaderboard, last-time, last-sweep, title-count, MVP lookup,
+#                  state-records (first sheet), personal-record (PR/PB), records (all-time)
 #   • Intent-specific presentation (cards, metrics, compact tables)
 #   • Entity highlighting ("What I understood"), quick examples, clear-question button
 #   • Meet/event canonicalization; "state" defaults; strict table cosmetics
 #   • All-time loader parses per-event sheets (Girls/Boys <Event>), handles time & field marks
 #
-# Updates included:
-#   • Removed intent headers (start results with info cards/tables)
+# Updates included (cumulative):
+#   • Removed intent headers (results start with cards/tables)
 #   • "Edit detected filters" expander (override parser outputs)
 #   • Altair timeline for last-win (sweep charts removed)
 #   • Synonym: "New Castle County championships"
@@ -22,10 +23,11 @@
 #   • Reduced quick example chips to four
 #   • Title count: single total metric + bar chart by year (no per-gender banners)
 #   • MVP lookup: show "athlete name, school" list instead of numeric metric, then table
-#   • Athlete Profiles: "All meets" default first; stacked titles-by-year chart reflecting current scope with provided colors
+#   • Athlete Profiles: "All meets" default first; stacked titles-by-year chart (current scope) with provided colors
 #   • Leaderboard top-1 card simplified: only "Athlete — School" and win total (no gender/context)
-#   • Removed "Show athlete profile" link from Q&A results
-
+#   • State records (first sheet) activated for "state records" queries (outdoor)
+#   • Personal record (PR/PB/personal best/record/fastest time) intent using all-time per-event sheets
+#
 import io
 import re
 import math
@@ -361,6 +363,9 @@ def _mark_sort_key(ev: str, mark: str):
         return (0, -val if val is not None else math.inf)
     return (1, math.inf)
 
+# ----------------------------
+# Loaders for All-Time (per-event) and State Records (first sheet)
+# ----------------------------
 @st.cache_data(show_spinner=False)
 def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
     """
@@ -483,6 +488,160 @@ def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
     out = pd.concat(rows_all, ignore_index=True)
     out["event"] = out["event"].apply(lambda e: canonical_event(str(e), None) or str(e))
     out = out[~out["name"].astype(str).str.lower().str.contains(r"^wind\s*reading$", regex=True, na=False)]
+    return out.reset_index(drop=True)
+
+@st.cache_data(show_spinner=False)
+def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
+    """
+    Parse the FIRST sheet of the Personal All-Time List workbook as OUTDOOR STATE RECORDS.
+
+    Expected flexible headers (case-insensitive, may vary):
+      - Event (required-ish; if missing, try to infer)
+      - Gender (optional; if missing, attempt to infer from Event value)
+      - Time/Mark (or Time, Mark)
+      - Name
+      - School
+      - Meet
+      - Location
+      - Date
+
+    Output columns:
+      ["gender","event","mark","name","school","year","meet","location","source_name","ingested_at"]
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    if not wb.worksheets:
+        return pd.DataFrame(columns=["gender","event","mark","name","school","year","meet","location"])
+    ws = wb.worksheets[0]  # first sheet only
+
+    # Heuristic: find header row by presence of "name" and ("time" or "mark" or "time/mark")
+    def find_header_row(ws) -> Optional[int]:
+        max_probe = min(ws.max_row, 30)
+        for r in range(1, max_probe+1):
+            lower = []
+            for c in range(1, ws.max_column+1):
+                v = ws.cell(row=r, column=c).value
+                lower.append(str(v).strip().lower() if v is not None else "")
+            lower_set = set(lower)
+            if "name" in lower_set and (("time" in lower_set) or ("mark" in lower_set) or ("time/mark" in lower_set)):
+                return r
+            # Alternate: look for "event" + "name"
+            if "event" in lower_set and "name" in lower_set:
+                return r
+        return None
+
+    hdr_row = find_header_row(ws)
+    if not hdr_row:
+        # No parseable header — return empty but typed DF
+        return pd.DataFrame(columns=["gender","event","mark","name","school","year","meet","location"])
+
+    headers = []
+    for c in range(1, ws.max_column+1):
+        v = ws.cell(row=hdr_row, column=c).value
+        headers.append(str(v).strip().lower() if v is not None else "")
+    data = []
+    for r in range(hdr_row+1, ws.max_row+1):
+        row_vals = [ws.cell(row=r, column=c).value for c in range(1, ws.max_column+1)]
+        if all(v in (None, "", " ") for v in row_vals):
+            continue
+        data.append(row_vals)
+    if not data:
+        return pd.DataFrame(columns=["gender","event","mark","name","school","year","meet","location"])
+
+    df = pd.DataFrame(data, columns=headers)
+
+    # Normalize columns
+    rename_map = {}
+    for c in df.columns:
+        lc = c.strip().lower()
+        if lc in {"time/mark","time","mark"}: rename_map[c] = "mark"
+        elif lc in {"event"}:                 rename_map[c] = "event"
+        elif lc in {"gender","g"}:            rename_map[c] = "gender"
+        elif lc in {"name","athlete"}:        rename_map[c] = "name"
+        elif lc == "school":                  rename_map[c] = "school"
+        elif lc == "meet":                    rename_map[c] = "meet"
+        elif lc == "location":                rename_map[c] = "location"
+        elif lc == "date":                    rename_map[c] = "date"
+        else:
+            # preserve unknown columns as-is (ignored)
+            rename_map[c] = c
+    df = df.rename(columns=rename_map)
+
+    # Derive year from date serials/strings (if present)
+    if "date" in df.columns:
+        def _to_year(val):
+            try:
+                if isinstance(val, (int, float)):
+                    dt = pd.to_datetime(val, unit="d", origin="1899-12-30", errors="coerce")
+                    return int(dt.year) if pd.notna(dt) else None
+                dt = pd.to_datetime(str(val), errors="coerce")
+                return int(dt.year) if pd.notna(dt) else None
+            except Exception:
+                return None
+        df["year"] = df["date"].apply(_to_year)
+    else:
+        df["year"] = None
+
+    # Attempt to infer gender and event if missing or embedded in event text, e.g., "Girls 400"
+    if "event" not in df.columns:
+        # Try to find a column likely containing event labels (e.g., first non-empty column)
+        # If not present, we cannot use the sheet meaningfully.
+        df["event"] = None
+
+    # Clean event text and infer gender if needed
+    def _split_gender_from_event(ev_raw: str, g_raw: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        ev = None; g = None
+        if isinstance(ev_raw, str):
+            s = ev_raw.strip()
+            m = re.match(r"^\s*(girls?|boys?)\s+(.+)$", s, flags=re.IGNORECASE)
+            if m:
+                gtxt = m.group(1).strip().lower()
+                ev = m.group(2).strip()
+                g = "GIRLS" if gtxt.startswith("girl") or gtxt == "g" else "BOYS"
+            else:
+                ev = s
+        if not g and isinstance(g_raw, str):
+            gtxt = g_raw.strip().lower()
+            if gtxt in {"girls","girl","g","women","female"}: g = "GIRLS"
+            elif gtxt in {"boys","boy","b","men","male"}:     g = "BOYS"
+        return (g, ev)
+
+    # Build output rows; require at least mark, name, event
+    rows = []
+    for _, r in df.iterrows():
+        mark = r.get("mark")
+        name = r.get("name")
+        ev_in = r.get("event")
+        g_in  = r.get("gender")
+        school = r.get("school")
+        meet = r.get("meet")
+        location = r.get("location")
+        year = r.get("year")
+        if mark in (None, "") or name in (None, ""):
+            continue
+        g, ev = _split_gender_from_event(str(ev_in) if ev_in is not None else "", g_in)
+        # If still missing event, skip (cannot route a record without event)
+        if not ev:
+            continue
+        ev_can = canonical_event(str(ev), None) or str(ev)
+        rows.append({
+            "gender": g if g in {"GIRLS","BOYS"} else None,
+            "event": ev_can,
+            "mark": mark,
+            "name": str(name).strip(),
+            "school": str(school).strip() if school not in (None, "") else None,
+            "meet": str(meet).strip() if meet not in (None, "") else None,
+            "location": str(location).strip() if location not in (None, "") else None,
+            "year": int(year) if pd.notna(year) else None,
+            "source_name": "state_records",
+            "ingested_at": pd.Timestamp.utcnow().isoformat(),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["gender","event","mark","name","school","year","meet","location"])
+
+    out = pd.DataFrame.from_records(rows)
+    # If gender still missing for some rows, leave as None (we'll allow filtering without gender)
+    # Clean up event canonicalization one more time
+    out["event"] = out["event"].apply(lambda e: canonical_event(str(e), None) or str(e))
     return out.reset_index(drop=True)
 
 # ----------------------------
@@ -673,6 +832,12 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     }
     low = q.lower()
 
+    # --- NEW: Personal Record detection (prioritize before records) ---
+    if (re.search(r"\b(pr|pb)\b", low) or
+        re.search(r"\bpersonal\s+(best|record)\b", low) or
+        (("fastest" in low or "best" in low) and "'" in low)):  # e.g., "X's fastest time"
+        out["intent"] = "personal_record"
+
     # Intents
     if re.search(r"\bhow many\b.*\b(championships?|titles?)\b", low):
         out["intent"] = "count_titles"
@@ -690,19 +855,28 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     if (re.search(r"\b(most|record)\b.*\b(win|wins|won|titles?|races?)\b", low) or
         re.search(r"\b(win|wins|won|titles?|races?)\b.*\b(most|record)\b", low) or
         re.search(r"\btop\s+\d+\b", low)):
-        out["intent"] = "leaderboard_wins"
+        if out["intent"] != "personal_record":  # do not override PR intent
+            out["intent"] = "leaderboard_wins"
+
+    # --- NEW: State Records intent (outdoor) ---
+    if re.search(r"\bstate\s+records?\b", low) or re.search(r"\boutdoor\s+state\s+records?\b", low):
+        out["intent"] = "state_records_lookup"
+        # If indoor explicitly present, we won't use the first sheet (assumed outdoor); we keep intent but will message if no indoor data.
 
     # Last time variants
     if re.search(r"\bwhen was the last time\b.*\bwon\b", low) or re.search(r"\bmost recent\b.*\bwin\b", low):
-        out["intent"] = "last_win_time"
+        if out["intent"] != "personal_record":
+            out["intent"] = "last_win_time"
     if re.search(r"\bwho was the last\b.*\bto win\b", low):
-        out["intent"] = "last_win_time"
+        if out["intent"] != "personal_record":
+            out["intent"] = "last_win_time"
 
-    # Records / all-time lists
+    # Records / all-time lists (top lists / fastest in history)
     if (re.search(r"\b(all[-\s]?time|top\s+times?|top\s+marks?|records?)\b", low) or
         re.search(r"\bfastest\b", low) or re.search(r"\bfurthest|longest\b", low) or
         re.search(r"\bbest\b.*\b(mark|time)\b", low)):
-        out["intent"] = "records_lookup"
+        if out["intent"] not in ("personal_record","state_records_lookup"):
+            out["intent"] = "records_lookup"
 
     # Top N
     m_top = re.search(r"\btop\s+(\d+)\b", low)
@@ -736,7 +910,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     for m in re.finditer(r"\b(?:from|at|by)\s+([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*)+)", q):
         out["schools"].append(m.group(1).strip())
 
-    # Athletes (quoted / lead-ins)
+    # Athletes (quoted / lead-ins / possessive)
     for m in re.finditer(r"\"([^\"]+)\"", q):
         out["athletes"].append(m.group(1).strip())
     m = re.search(r"\b(?:has|did|for|by|from|at)\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
@@ -745,7 +919,11 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     m = re.search(r"\bby\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
     if m:
         out["athletes"].append(m.group(1).strip())
+    # Possessive: "Jarod Wilson's"
+    for m in re.finditer(r"\b([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)'s\b", q):
+        out["athletes"].append(m.group(1).strip())
 
+    # De-duplicate preserving order
     out["schools"]  = list(dict.fromkeys(out["schools"]))
     out["athletes"] = list(dict.fromkeys(out["athletes"]))
 
@@ -858,6 +1036,7 @@ with st.sidebar:
 
     st.header("All‑Time Lists (bundled)")
     alltime_df = None
+    state_records_df = None
     if not BUNDLED_ALLTIME_XLSX_PATH.exists():
         st.warning(
             f"All‑time workbook not found at:\n{BUNDLED_ALLTIME_XLSX_PATH}\n\n"
@@ -868,12 +1047,15 @@ with st.sidebar:
             with open(BUNDLED_ALLTIME_XLSX_PATH, "rb") as f:
                 at_bytes = f.read()
             alltime_df = load_alltime(at_bytes, "xlsx")
+            state_records_df = load_state_records_first_sheet(at_bytes)
             st.success(f"Loaded all‑time rows: {len(alltime_df):,}")
+            st.success(f"Loaded state records (first sheet): {0 if state_records_df is None else len(state_records_df):,}")
             st.caption(f"All‑time workbook: {BUNDLED_ALLTIME_XLSX_NAME}")
         except Exception as ex:
             st.error("There was a problem parsing the bundled all‑time workbook.")
             st.exception(ex)
             alltime_df = None
+            state_records_df = None
 
 # ------------------------------------------------
 
@@ -883,7 +1065,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 ])
 
 # ----------------------------
-# Helpers for deep-linking (retain Q deep-link; no profile link)
+# Helpers for deep-linking (retain Q deep-link)
 # ----------------------------
 def _get_q_from_url():
     try:
@@ -931,7 +1113,7 @@ def _get_athlete_from_url():
 # ----------------------------
 with tab1:
     st.subheader("Natural-language Q&A")
-    st.caption("Ask questions about state champions, leaderboards, MVPs, sweeps, and all‑time lists.")
+    st.caption("Ask questions about state champions, leaderboards, MVPs, sweeps, state records, PRs/PBs, and all‑time lists.")
 
     # Prime from URL if empty
     if "q_prefill" not in st.session_state or not st.session_state["q_prefill"]:
@@ -1006,6 +1188,8 @@ with tab1:
                 "last_win_time": "Last Time",
                 "last_sweep": "Last Sweep",
                 "records_lookup": "All‑Time / Records",
+                "state_records_lookup": "State Records",
+                "personal_record": "Personal Record",
             }.get(intent, intent)
             parts.insert(0, f"**Intent:** {label}")
         if parts:
@@ -1016,6 +1200,7 @@ with tab1:
         with st.expander("Edit detected filters", expanded=False):
             genders_opts = ["GIRLS", "BOYS"]
             meets_opts   = sorted(df["meet"].dropna().unique().tolist())
+            # Events from champions for consistency; for all-time/records, events overlap fine
             events_opts  = sorted(df["event"].dropna().unique().tolist())
 
             sel_genders = st.multiselect("Gender", options=genders_opts, default=fm.get("genders", []))
@@ -1084,7 +1269,6 @@ with tab1:
                 scope_label = "State championships" if include_meets == STATE_MEETS_ALL else "Championships (all meets)"
 
             athlete = f_multi["athletes"][0]
-            # Determine genders to include (if unspecified, guess)
             genders_to_check = f_multi["genders"] if f_multi["genders"] else guess_gender_for_name(df, athlete)
             df_scope = df[df["gender"].isin(genders_to_check)]
 
@@ -1092,7 +1276,6 @@ with tab1:
             metric_row([("Titles", str(total_count))])
 
             if total_count > 0:
-                # Bar chart: titles by year (exclude zero years)
                 timeline_chart = plot_timeline_year_counts(rows[["year"]].dropna(), title="Titles by year")
                 if timeline_chart is not None:
                     st.altair_chart(timeline_chart, use_container_width=True)
@@ -1141,7 +1324,6 @@ with tab1:
             if cur.empty:
                 st.warning("No MVPs matched your filters.")
             else:
-                # Show "athlete name, school" list
                 names = []
                 for _, r in cur.iterrows():
                     nm = str(r["name"]).strip()
@@ -1149,7 +1331,6 @@ with tab1:
                     names.append(f"{nm}, {sch}" if sch else nm)
                 st.caption("MVPs")
                 st.markdown("\n".join([f"- {s}" for s in sorted(set(names))]))
-                # Then show the table as-is
                 show_table(cur.sort_values(["season_end","gender","scope"])[["gender","scope","season_label","name","school","category"]])
             st.stop()
 
@@ -1185,7 +1366,6 @@ with tab1:
                     ("School", str(r0["school"])),
                 ],
             )
-            # Timeline of wins over the years (matching filters)
             timeline_src = cur.copy()
             timeline_src = timeline_src[~timeline_src["event"].isin(EVENT_GROUPS["relays"])]
             timeline_chart = plot_timeline_year_counts(timeline_src, title="Wins by Year (matching your filters)")
@@ -1240,8 +1420,6 @@ with tab1:
                 winners = ", ".join(sorted(last_hits["name"].unique()))
                 metric_row([("Year", str(last_year)), ("Winner(s)", winners)])
 
-                # (Per request) No bar chart visualization for sweeps
-
                 detail = cur[cur["year"] == last_year]
                 detail = detail.merge(last_hits[["year","meet","gender","name"]], on=["year","meet","gender","name"], how="inner")
                 detail = detail.sort_values(["gender","meet","name","event"])
@@ -1257,10 +1435,8 @@ with tab1:
 
             if f_multi.get("top_n", 10) == 1 and not lb.empty:
                 row = lb.iloc[0]
-                # Simplified top-1 card: only athlete — school and wins
                 top1_card(name=row["name"], school=row["school"], gender=row["gender"], wins=int(row["wins"]))
 
-                # Below card: that athlete’s wins table with full context
                 cur = apply_multi_filters(df, f_multi)
                 wins_rows = cur[
                     (cur["name"] == row["name"]) &
@@ -1277,6 +1453,111 @@ with tab1:
                 with st.expander("Detected filters"): st.json(f_multi)
             else:
                 show_table(lb.reset_index(drop=True)[["gender","name","school","wins"]])
+            st.stop()
+
+        # ---- NEW: State Records (Outdoor) from first sheet ----
+        if f_multi.get("intent") == "state_records_lookup":
+            if state_records_df is None or state_records_df.empty:
+                st.error("State records sheet not loaded or not parseable. Please ensure the first sheet of the All‑Time workbook contains Outdoor state records.")
+                st.stop()
+
+            cur = state_records_df.copy()
+            # Filter by gender, event (if provided)
+            if f_multi["genders"]:
+                cur = cur[cur["gender"].isin(f_multi["genders"])]
+            if f_multi["events"]:
+                cur = cur[cur["event"].isin(f_multi["events"])]
+
+            if cur.empty:
+                st.warning("No state-record entries matched your filters. Try specifying gender and event (e.g., 'Girls 400 state record').")
+                st.stop()
+
+            # If a single event/gender, show an info card; else show a table
+            cur = cur.sort_values(["gender","event"])
+            if len(cur) == 1:
+                r0 = cur.iloc[0]
+                info_card(
+                    title=f"{str(r0['gender']).title() if pd.notna(r0['gender']) else ''} — {r0['event']} (State Record)",
+                    lines=[
+                        ("Athlete/Team", str(r0["name"])),
+                        ("Time/Mark", str(r0["mark"])),
+                        ("School", str(r0["school"] or "")),
+                        ("Year", str(r0["year"] or "")),
+                        ("Meet", str(r0["meet"] or "")),
+                        ("Location", str(r0["location"] or "")),
+                    ],
+                )
+            else:
+                show_table(cur[["gender","event","mark","name","school","year","meet","location"]])
+            st.stop()
+
+        # ---- NEW: Personal Record (PR/PB/personal best/fastest time) ----
+        if f_multi.get("intent") == "personal_record":
+            if alltime_df is None or alltime_df.empty:
+                st.error("All‑time workbook not loaded. Add it to the repo to use PR/PB queries.")
+                st.stop()
+
+            # Need athlete + event
+            if not f_multi["athletes"]:
+                st.info('I couldn’t identify the athlete’s name. Try quoting it, e.g., “What is "Jarod Wilson"’s PR in the 800?”')
+                st.stop()
+            if not f_multi["events"]:
+                st.info('Please specify the event, e.g., “PR in the 800” or “personal best in long jump”.')
+                st.stop()
+
+            athlete = f_multi["athletes"][0]
+            events = sorted(f_multi["events"])
+            # Guess genders for athlete to narrow search
+            genders = guess_gender_for_name(alltime_df, athlete)
+
+            # Find the athlete’s best per requested event
+            outs = []
+            name_norm = normalize_name(athlete)
+            for ev in events:
+                sub = alltime_df[
+                    (alltime_df["event"] == ev) &
+                    (alltime_df["gender"].isin(genders))
+                ].copy()
+                if sub.empty:
+                    continue
+                sub["name_norm"] = sub["name"].astype(str).apply(normalize_name)
+                sub = sub[sub["name_norm"] == name_norm]
+                if sub.empty:
+                    continue
+                # Best row by precomputed __sortkey (ascending is best)
+                sub = sub.sort_values("__sortkey", ascending=True)
+                best = sub.iloc[0]
+                outs.append(best)
+
+            if not outs:
+                st.warning("No matching all‑time entries found for that athlete and event.")
+                st.stop()
+
+            # If single result, show info card; else show a concise table
+            if len(outs) == 1:
+                r0 = outs[0]
+                info_card(
+                    title=f"{r0['name']} — {r0['event']} (Personal Record)",
+                    lines=[
+                        ("Time/Mark", str(r0["mark"])),
+                        ("School", str(r0["school"] or "")),
+                        ("Year", str(r0["year"] or "")),
+                        ("Meet", str(r0["meet"] or "")),
+                        ("Location", str(r0["location"] or "")),
+                    ],
+                )
+            else:
+                pr_df = pd.DataFrame([{
+                    "gender": r["gender"],
+                    "event": r["event"],
+                    "mark": r["mark"],
+                    "name": r["name"],
+                    "school": r.get("school"),
+                    "year": r.get("year"),
+                    "meet": r.get("meet"),
+                    "location": r.get("location"),
+                } for r in outs])
+                show_table(pr_df[["gender","event","mark","name","school","year","meet","location"]])
             st.stop()
 
         # ---- Records / All-time lists ----
@@ -1552,21 +1833,24 @@ with tab5:
         st.info("No data loaded.")
     else:
         try:
-            c1,c2,c3,c4,c5 = st.columns(5)
+            c1,c2,c3,c4,c5,c6 = st.columns(6)
             c1.metric("Champion rows", f"{len(df):,}")
             c2.metric("Min champ year", int(df["year"].min()))
             c3.metric("Max champ year", int(df["year"].max()))
             c4.metric("MVP rows", 0 if (mvps_df is None) else len(mvps_df))
             c5.metric("All‑time rows", 0 if (alltime_df is None) else len(alltime_df))
+            c6.metric("State-record rows", 0 if (state_records_df is None) else len(state_records_df))
         except Exception:
             st.metric("Champion rows", f"{len(df):,}")
         st.write("Meets (champions):", sorted(df["meet"].unique()))
         st.write("Events (sample):", sorted(df["event"].unique())[:16])
         if alltime_df is not None and not alltime_df.empty:
             st.write("All‑time events:", sorted(alltime_df["event"].dropna().unique().tolist())[:20])
-        if mvps_df is not None and not alltime_df is None and not mvps_df.empty:
+        if mvps_df is not None and not mvps_df.empty:
             st.write("MVP scopes:", sorted(mvps_df["scope"].unique().tolist()))
             st.write("MVP seasons range:", f"{int(mvps_df['season_end'].min())} → {int(mvps_df['season_end'].max())}")
+        if state_records_df is not None and not state_records_df.empty:
+            st.write("State-record events:", sorted(state_records_df["event"].dropna().unique().tolist())[:20])
         st.write("Champions sample:")
         show_table(df.head(20))
 
