@@ -20,15 +20,11 @@
 #   • Boundary-aware event detection (no more 200 from “2000s”/“2004”)
 #   • Apostrophe normalization in queries
 #   • Consistent year dtype + robust filtering
-#   • NEW A: School‑win counts — with exact matching for Newark vs Newark Charter
-#   • NEW B: Progression / trend line chart on request
-#
-# Tweaks retained:
-#   • Year values show as whole numbers (e.g., 2017) in record responses
-#   • “Athlete/Team” → “Athlete(s)” in cards/responses
-#   • Relays: map athletes to the name field; keep school in school field
-#   • State Records tab: remove athletes column from the table
-#   • All tables: Capitalize first letter of each header label
+#   • Newark-vs-Newark Charter exact-match rule for school-win counts
+#   • Progression / trend line chart intent & plotting
+#   • NEW (this patch): Auto-tight Y-axis for progression charts + flipped so faster times appear higher
+#   • NEW (this patch): Removed mini "Wins by Year" chart from Last Time lookups (rest unchanged)
+#   • NEW (this patch): Optional fine-tuning scaffold for per-event Y-axis overrides
 
 import io
 import re
@@ -821,7 +817,6 @@ def _find_multi_targets(q: str, vocabulary: Dict[str, str]) -> List[str]:
             ordered.append(x)
     return ordered
 
-# --- Decade-aware ranges and before/after operators ---
 DECADE_OFFSETS = {
     "early": (0, 4),
     "mid":   (3, 7),
@@ -1096,6 +1091,47 @@ def plot_timeline_year_counts(df: pd.DataFrame, *, title: str, year_col: str = "
     ).properties(title=title, width="container")
     return c
 
+# -------- Optional Fine-tuning (Y-axis overrides) --------
+# Provide override domains for specific (gender, event) pairs if desired.
+# Leave this dict empty to rely purely on automatic tight-scaling.
+# Example (uncomment to use):
+# TIGHT_Y_OVERRIDES = {
+#     ("BOYS", "400"): (45.0, 53.0),
+#     ("GIRLS", "400"): (52.0, 60.0),
+#     (None,  "1600"): (250.0, 360.0),  # applies to both genders if gender-specific not provided
+# }
+TIGHT_Y_OVERRIDES: Dict[Tuple[Optional[str], str], Tuple[float, float]] = {}
+
+
+def _find_override_domain(cur: pd.DataFrame) -> Optional[Tuple[float, float]]:
+    if not TIGHT_Y_OVERRIDES:
+        return None
+    genders = set(cur.get("gender", pd.Series(dtype=str)).dropna().astype(str))
+    events  = set(cur.get("event", pd.Series(dtype=str)).dropna().astype(str))
+    # Prefer (gender,event) exact; fallback to (None,event)
+    for ev in events:
+        for g in genders or {None}:
+            key = (g, ev)
+            if key in TIGHT_Y_OVERRIDES:
+                return TIGHT_Y_OVERRIDES[key]
+        key2 = (None, ev)
+        if key2 in TIGHT_Y_OVERRIDES:
+            return TIGHT_Y_OVERRIDES[key2]
+    return None
+
+
+def _tight_y_domain(values: pd.Series, *, is_timed: bool, min_pad_ratio: float = 0.06, min_pad_abs: float = 0.10) -> Optional[list]:
+    vals = pd.to_numeric(values, errors="coerce").dropna()
+    if vals.empty:
+        return None
+    vmin, vmax = float(vals.min()), float(vals.max())
+    if math.isclose(vmin, vmax):
+        pad = max(min_pad_abs, 0.02 * (abs(vmax) + 1))
+        return [vmin - pad, vmax + pad]
+    rng = vmax - vmin
+    pad = max(min_pad_abs, min_pad_ratio * rng)
+    return [vmin - pad, vmax + pad]
+
 
 def _numeric_mark_for_event(ev: str, mark: str):
     ev = str(ev)
@@ -1117,9 +1153,20 @@ def plot_progression(cur: pd.DataFrame, title: str = "Progression over time"):
         return None
 
     evs = set(cur["event"].dropna().astype(str))
-    all_timed = all(e in LOWER_BETTER for e in evs) if evs else False
-    y_title = "Time (seconds)" if all_timed else ("Distance (inches)" if all(e in HIGHER_BETTER for e in evs) else "Mark (numeric)")
-    y_scale = alt.Scale(reverse=all_timed)
+    is_all_timed  = all(e in LOWER_BETTER for e in evs) if evs else False
+    is_all_field  = all(e in HIGHER_BETTER for e in evs) if evs else False
+
+    y_title = "Time (seconds)" if is_all_timed else ("Distance (inches)" if is_all_field else "Mark (numeric)")
+
+    # Determine domain: override > tight from data
+    override_dom = _find_override_domain(cur)
+    if override_dom:
+        y_domain = list(override_dom)
+    else:
+        y_domain = _tight_y_domain(cur["value"], is_timed=is_all_timed)
+
+    # Flip Y for timed events so faster (smaller) values appear higher
+    y_scale = alt.Scale(reverse=is_all_timed, domain=y_domain)
 
     color_field = None
     if len(evs) > 1:
@@ -1273,16 +1320,17 @@ def _set_q_in_url(qval: str):
 # ----------------------------
 with tab1:
     st.subheader("Natural-language Q&A")
-    st.caption("Ask about champions, leaderboards, MVPs, last wins, **state records** (Outdoor by default; add 'indoor' to switch), **PR/PB**, **school-win counts**, and **progression charts**.")
+    st.caption("Ask about champions, leaderboards, MVPs, last wins, **state records** (Outdoor by default; add 'indoor' to switch), **PR/PB**, and all‑time lists.")
 
     if "q_prefill" not in st.session_state or not st.session_state["q_prefill"]:
         url_q = _get_q_from_url()
         if url_q:
             st.session_state["q_prefill"] = url_q
 
+    # Preserve original quick examples (do not change without request)
     example_prompts = [
-        "How many times has a Newark runner won the boys 400 at the Meet of Champions?",
-        "Show the progression of the girls 1600 at Division II since 2005.",
+        "Who won the boys 200 at the indoor state meet in 2026?",
+        "How many state championships did Juliana Balon win?",
         "Who has won the most New Castle County Championships races?",
         "What is the girls 200 state record?",
     ]
@@ -1626,11 +1674,7 @@ with tab1:
                     ("School", str(r0["school"])),
                 ],
             )
-            timeline_src = cur.copy()
-            timeline_src = timeline_src[~timeline_src["event"].isin(EVENT_GROUPS["relays"])]
-            chart = plot_timeline_year_counts(timeline_src, title="Wins by Year (matching your filters)")
-            if chart is not None:
-                st.altair_chart(chart, use_container_width=True)
+            # Removed the 'Wins by Year' bar chart per request.
             if len(latest_rows) > 1:
                 st.caption("All matching winners in that year")
                 show_table(latest_rows[["gender","year","meet","event","name","school","class","mark"]])
