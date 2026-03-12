@@ -11,27 +11,24 @@
 #       - "Personal All-Time List_Indoor.xlsx"
 #       - "Indoor Personal All-Time List.xlsx"
 #
-# New in this version (patch rollup):
+# Patch rollup:
 #   • Robust state-records parser with numeric event normalization (100.0 → 100)
 #   • Season-aware "🏅 State Records" routing (Outdoor default; Indoor if asked & available)
 #   • "🏅 State Records" tab lists events as whole numbers
 #   • Queries like “What is the girls 200 state record?” resolve correctly
-#   • ✨ FIX: Decade-aware year parsing (1980s/1990s/2000s; early/mid/late; before/after/since)
-#   • ✨ FIX: Boundary-aware event detection (no more 200 from “2000s” or 2004)
-#   • ✨ FIX: Shorthand year-range like 2008–09
-#   • ✨ IMPROVE: Normalize apostrophes in queries; consistent year dtype and filtering
+#   • Decade-aware year parsing (1980s/1990s/2000s; early/mid/late; before/after/since; 2008–09)
+#   • Boundary-aware event detection (no more 200 from “2000s”/“2004”)
+#   • Apostrophe normalization in queries
+#   • Consistent year dtype + robust filtering
+#   • NEW A: School‑win counts — with exact matching for Newark vs Newark Charter
+#   • NEW B: Progression / trend line chart on request
 #
-# Tweaks in this patch:
+# Tweaks retained:
 #   • Year values show as whole numbers (e.g., 2017) in record responses
 #   • “Athlete/Team” → “Athlete(s)” in cards/responses
 #   • Relays: map athletes to the name field; keep school in school field
 #   • State Records tab: remove athletes column from the table
-#   • All tables: capitalize the first letter of each header label (e.g., Gender)
-#
-# Prior improvements retained:
-#   • First-sheet state records parser (events in G/H; boys A–F; girls I–N; relay structure supported)
-#   • PR/PB/personal best/record/fastest time queries use best mark from all-time per-event sheets
-#   • Leaderboard top-1 card simplified: only "Athlete — School" + wins
+#   • All tables: Capitalize first letter of each header label
 
 import io
 import re
@@ -222,7 +219,6 @@ def load_champions(file_bytes: bytes) -> pd.DataFrame:
     boys_df = parse_champions_sheet(wb["BOYS"], "BOYS")
     out = pd.concat([girls_df, boys_df], ignore_index=True)
     out["event"] = out["event"].astype(str).str.replace(r"\.0$", "", regex=True)
-    # Ensure year is numeric and consistent for filtering
     out["year"] = pd.to_numeric(out["year"], errors="coerce").astype("Int64")
     return out
 
@@ -516,12 +512,6 @@ def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
 # ---- New: event normalization helper for state-records ----
 
 def normalize_event_text_for_records(raw) -> Optional[str]:
-    """
-    Normalize event labels from the state-records first sheet:
-    - If numeric (int/float), cast to whole number string when integer-like (e.g., 100, 200).
-    - Strip trailing '.0' from text (e.g., '100.0' -> '100').
-    - Map to canonical event labels where possible.
-    """
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -549,14 +539,6 @@ def normalize_event_text_for_records(raw) -> Optional[str]:
 
 @st.cache_data(show_spinner=False)
 def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
-    """
-    Parse FIRST SHEET layout:
-      • Events listed in center columns G and H
-      • Boys records (left):  A-F -> [Time/Mark, Name, School, Meet, Location, Date]
-      • Girls records (right): I-N -> [Time/Mark, Name, School, Meet, Location, Date]
-      • Relay events use: Time, School, Participating athletes, Meet, Location, Date
-    Output columns: gender,event,mark,name,school,athletes,meet,location,year
-    """
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     if not wb.worksheets:
         return pd.DataFrame(columns=["gender","event","mark","name","school","athletes","meet","location","year"])
@@ -576,10 +558,6 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
         return None if v in (None, "") else str(v).strip()
 
     def current_event_from_cells(g_raw, h_raw, last_event):
-        """
-        Prefer right cell (H) if present, else left (G); if neither present, use last_event.
-        Normalize using normalize_event_text_for_records to ensure whole numbers + canonical labels.
-        """
         ev_raw = h_raw if h_raw not in (None, "") else g_raw
         ev_norm = normalize_event_text_for_records(ev_raw)
         return ev_norm or last_event
@@ -592,21 +570,17 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
     rows_out = []
     last_event = None
     for r in range(1, ws.max_row + 1):
-        # Read center columns for event (raw values)
-        g_raw = ws.cell(row=r, column=7).value   # G
-        h_raw = ws.cell(row=r, column=8).value   # H
+        g_raw = ws.cell(row=r, column=7).value
+        h_raw = ws.cell(row=r, column=8).value
         last_event = current_event_from_cells(g_raw, h_raw, last_event)
         if not last_event:
             continue
 
         ev_canon = normalize_event_text_for_records(last_event) or str(last_event)
 
-        # Boys side (A-F)
         b_cols = [ws.cell(row=r, column=c).value for c in range(1, 7)]
-        # Girls side (I-N)
         g_cols = [ws.cell(row=r, column=c).value for c in range(9, 15)]
 
-        # Skip obvious header rows
         b_time = clean_txt(b_cols[0])
         g_time = clean_txt(g_cols[0])
         if (b_time and b_time.lower() in header_like) or (g_time and g_time.lower() in header_like):
@@ -621,10 +595,9 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
             if not time_mark:
                 return
             if relay:
-                # Map relay athletes to the NAME field; keep SCHOOL in the SCHOOL field
                 school = clean_txt(side_cols[1])
                 athletes = clean_txt(side_cols[2])
-                name = athletes  # key change
+                name = athletes
                 meet = clean_txt(side_cols[3])
                 location = clean_txt(side_cols[4])
                 date = side_cols[5]
@@ -656,11 +629,9 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
         return pd.DataFrame(columns=["gender","event","mark","name","school","athletes","meet","location","year"])
 
     df = pd.DataFrame.from_records(rows_out)
-    # Final canonicalization + ensure no trailing .0
     df["event"] = df["event"].apply(lambda e: canonical_event(str(e), None) or str(e))
     df["event"] = df["event"].astype(str).str.replace(r"\.0$", "", regex=True)
 
-    # Make sure year dtype is int-like where possible (prevents 2017.0 artifacts)
     if "year" in df.columns:
         df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
 
@@ -724,9 +695,6 @@ def _reorder_gender_first(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pretty_headers(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Capitalize first letter of each header label. (e.g., 'gender' -> 'Gender')
-    """
     df = df.copy()
     df.columns = [c[:1].upper() + c[1:] if c else c for c in df.columns]
     return df
@@ -853,7 +821,7 @@ def _find_multi_targets(q: str, vocabulary: Dict[str, str]) -> List[str]:
             ordered.append(x)
     return ordered
 
-# --- PATCH: decade-aware ranges and before/after operators ---
+# --- Decade-aware ranges and before/after operators ---
 DECADE_OFFSETS = {
     "early": (0, 4),
     "mid":   (3, 7),
@@ -864,20 +832,17 @@ DECADE_OFFSETS = {
 def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
     low = q.lower().replace("’", "'")
 
-    # Shorthand like "2008-09" -> 2008..2009
     m = re.search(r"\b(20\d{2})\s*[-/]\s*(\d{2})\b", low)
     if m:
         y1 = int(m.group(1))
         y2 = int(str(y1)[:2] + m.group(2))
         return (y1, y2) if y1 <= y2 else (y2, y1)
 
-    # 1) Explicit ranges: "between 1998 and 2003" or "from 1998 to 2003"
     m = re.search(r"(?:between|from)\s*((?:18|19|20)\d{2})\s*(?:and|to|-)\s*((?:18|19|20)\d{2})", low)
     if m:
         a, b = int(m.group(1)), int(m.group(2))
         return min(a, b), max(a, b)
 
-    # 2) Before / prior to / earlier than / through / up to / by (end)
     m = re.search(r"\b(before|prior to|earlier than|through|up to|by)\s*((?:18|19|20)\d{2})\b", low)
     if m:
         year = int(m.group(2))
@@ -885,7 +850,6 @@ def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
             return None, year
         return None, year - 1
 
-    # 3) After / later than / since
     m = re.search(r"\b(after|later than|since)\s*((?:18|19|20)\d{2})\b", low)
     if m:
         year = int(m.group(2))
@@ -893,14 +857,11 @@ def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
             return year, None
         return year + 1, None
 
-    # 4) "in 1997", "in 2004"
     m = re.search(r"\bin\s*((?:18|19|20)\d{2})\b", low)
     if m:
         y = int(m.group(1))
         return y, y
 
-    # 5) Decades: "2000s", "1990s", "'90s" with optional early/mid/late
-    # a) 4-digit decades like "2000s"
     m = re.search(r"\b(early|mid|late)?\s*((?:18|19|20)\d{2})s\b", low)
     if m:
         eml = (m.group(1) or "").strip().lower()
@@ -912,7 +873,6 @@ def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
             return start + off[0], start + off[1]
         return start, end
 
-    # b) 3-digit + decade like "1990s"
     m = re.search(r"\b(early|mid|late)?\s*((?:18|19|20)\d)0s\b", low)
     if m:
         eml = (m.group(1) or "").strip().lower()
@@ -924,7 +884,6 @@ def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
             return start + off[0], start + off[1]
         return start, end
 
-    # c) "'90s" or "90s" → assume 1990s unless 00–29 → 2000s/2010s/2020s
     m = re.search(r"\b(early|mid|late)?\s*['']?(\d{2})s\b", low)
     if m:
         eml = (m.group(1) or "").strip().lower()
@@ -937,7 +896,6 @@ def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
             return start + off[0], start + off[1]
         return start, end
 
-    # 6) Plain year mentions (first two)
     yrs = [int(y) for y in re.findall(r"\b((?:18|19|20)\d{2})\b", low)]
     if len(yrs) == 1:
         return yrs[0], yrs[0]
@@ -946,7 +904,7 @@ def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
 
     return (None, None)
 
-# --- PATCH: boundary-aware event extraction (no 200 from 2000s) ---
+# --- Boundary-aware event extraction (mask decades) ---
 _EVENT_MULTIWORD = [
     "long jump", "triple jump", "high jump", "pole vault", "shot put", "discus"
 ]
@@ -954,11 +912,8 @@ _EVENT_MULTIWORD = [
 
 def _mask_decades(text: str) -> str:
     t = text
-    # Mask 4-digit decades like 2000s, 2010s
     t = re.sub(r"\b(?:18|19|20)\d{2}s\b", " ", t)
-    # Mask 1990s/1980s pattern
     t = re.sub(r"\b(?:18|19|20)\d0s\b", " ", t)
-    # Mask '90s/90s pattern
     t = re.sub(r"\b[’']?\d{2}s\b", " ", t)
     return t
 
@@ -968,39 +923,33 @@ def _extract_events_anywhere(q: str) -> set:
     masked = _mask_decades(low)
     events = set()
 
-    # 1) Multi-word event phrases
     for phrase in _EVENT_MULTIWORD:
         if re.search(rf"\b{re.escape(phrase)}\b", masked):
             events.add(EVENT_CANONICAL[phrase])
 
-    # 2) Explicit hurdle short codes
     for code in ["300h", "110h", "100h"]:
         if re.search(rf"\b{code}\b", masked):
             ev = canonical_event(code, None)
             if ev:
                 events.add(ev)
 
-    # 3) Numeric events with digit guards to avoid years/decades
     for num in ["55", "100", "200", "400", "800", "1600", "3200"]:
         if re.search(rf"(?<!\d)\b{num}\b(?!\d|0s)", masked):
             ev = canonical_event(num, None)
             if ev:
                 events.add(ev)
 
-    # 4) Canonical synonyms with word boundaries (skip pure numeric keys)
     for k, v in EVENT_CANONICAL.items():
         if k.isdigit():
             continue
         if re.search(rf"\b{re.escape(k)}\b", masked):
             events.add(v)
 
-    # 5) Group expansions (sprints/distance/etc.)
     events |= _expand_event_groups(_tokenize_phrases(q))
     return events
 
 
 def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
-    # Normalize typographic apostrophes upfront so regexes match '90s etc.
     q_norm = q.replace("’", "'")
     out = {
         "intent": None, "scope": None,
@@ -1017,7 +966,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         (("fastest" in low or "best" in low) and "'" in low)):
         out["intent"] = "personal_record"
 
-    # Title Count
+    # Title Count (athlete)
     if re.search(r"\bhow many\b.*\b(championships?|titles?)\b", low):
         out["intent"] = "count_titles"
         if "state" in low:
@@ -1026,6 +975,10 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
             out["scope"] = "indoor"
         if "outdoor" in low:
             out["scope"] = "outdoor"
+
+    # School-win count
+    if re.search(r"\bhow many\b.*\brunner\b.*\bwon\b", low) or re.search(r"\bhow many\b.*\bwins\b.*\b(for|by)\b", low):
+        out["intent"] = "count_school_titles"
 
     # MVP
     if "mvp" in low or "most valuable" in low:
@@ -1044,7 +997,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         if out["intent"] != "personal_record":
             out["intent"] = "leaderboard_wins"
 
-    # State Records (season-aware; default to outdoor at use-site)
+    # State Records
     if re.search(r"\bstate\s+records?\b", low) or re.search(r"\b(indoor|outdoor)\s+state\s+records?\b", low):
         out["intent"] = "state_records_lookup"
         if "indoor" in low:
@@ -1060,11 +1013,17 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         if out["intent"] != "personal_record":
             out["intent"] = "last_win_time"
 
+    # Progression / trend intent
+    if (re.search(r"\bprogression\b", low) or re.search(r"\bover time\b", low) or
+        re.search(r"\byear[- ]?by[- ]?year\b", low) or re.search(r"\bline (?:graph|chart)\b", low) or
+        re.search(r"\btrend\b", low)):
+        out["intent"] = "progression_chart"
+
     # Records / all-time lists
     if (re.search(r"\b(all[-\s]?time|top\s+times?|top\s+marks?|records?)\b", low) or
         re.search(r"\bfastest\b", low) or re.search(r"\bfurthest|longest\b", low) or
         re.search(r"\bbest\b.*\b(mark|time)\b", low)):
-        if out["intent"] not in ("personal_record","state_records_lookup"):
+        if out["intent"] not in ("personal_record","state_records_lookup","progression_chart"):
             out["intent"] = "records_lookup"
 
     m_top = re.search(r"\btop\s+(\d+)\b", low)
@@ -1102,6 +1061,10 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     for m in re.finditer(r"\b([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)'s\b", q_norm):
         out["athletes"].append(m.group(1).strip())
 
+    # School hint from phrase like "Newark runner"
+    for m in re.finditer(r"\b([A-Z][A-Za-z.&'-]*(?:\s+[A-Z][A-Za-z.&'-]*)*)\s+runner\b", q_norm):
+        out["schools"].append(m.group(1).strip())
+
     out["schools"]  = list(dict.fromkeys(out["schools"]))
     out["athletes"] = list(dict.fromkeys(out["athletes"]))
 
@@ -1113,53 +1076,8 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
 
     return out
 
-
-def apply_multi_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
-    cur = df.copy()
-    # Ensure numeric year column for robust filtering
-    cur["year_num"] = pd.to_numeric(cur.get("year"), errors="coerce")
-
-    if f["genders"]:
-        cur = cur[cur["gender"].isin(set(f["genders"]))]
-    if f["meets"]:
-        cur = cur[cur["meet"].isin(set(f["meets"]))]
-
-    if f["events"]:
-        cur = cur[cur["event"].isin(set(f["events"]))]
-
-    if f["schools"]:
-        mask = pd.Series(False, index=cur.index)
-        for s in f["schools"]:
-            needle = s.lower()
-            mask = mask | cur["school"].str.lower().str.contains(needle, na=False)
-        cur = cur[mask]
-    if f["athletes"]:
-        mask = pd.Series(False, index=cur.index)
-        for a in f["athletes"]:
-            needle = a.lower()
-            mask = mask | cur["name"].str.lower().str.contains(needle, na=False)
-        cur = cur[mask]
-    yf, yt = f.get("year_from"), f.get("year_to")
-    if yf and yt:
-        cur = cur[(cur["year_num"] >= yf) & (cur["year_num"] <= yt)]
-    elif yf and not yt:
-        cur = cur[cur["year_num"] >= yf]
-    if f.get("track_only"):
-        cur = cur[cur["event"].isin(TRACK_EVENTS)]
-    return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
-
-
-def leaderboard_wins(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
-    cur = apply_multi_filters(df, f)
-    grp = (cur.groupby(["gender","name","school"])
-              .size()
-              .reset_index(name="wins")
-              .sort_values(["wins","gender","name"], ascending=[False, True, True]))
-    top_n = f.get("top_n", 10)
-    return grp.head(top_n)
-
 # ----------------------------
-# Timeline helper
+# Timeline & progression helpers
 # ----------------------------
 
 def plot_timeline_year_counts(df: pd.DataFrame, *, title: str, year_col: str = "year"):
@@ -1178,9 +1096,66 @@ def plot_timeline_year_counts(df: pd.DataFrame, *, title: str, year_col: str = "
     ).properties(title=title, width="container")
     return c
 
+
+def _numeric_mark_for_event(ev: str, mark: str):
+    ev = str(ev)
+    if ev in LOWER_BETTER:
+        return _parse_time_to_seconds(mark)
+    if ev in HIGHER_BETTER:
+        return _parse_distance_to_float(mark)
+    return None
+
+
+def add_numeric_mark_column(cur: pd.DataFrame) -> pd.DataFrame:
+    cur = cur.copy()
+    cur["value"] = cur.apply(lambda r: _numeric_mark_for_event(str(r["event"]), str(r["mark"])), axis=1)
+    return cur
+
+
+def plot_progression(cur: pd.DataFrame, title: str = "Progression over time"):
+    if cur.empty:
+        return None
+
+    evs = set(cur["event"].dropna().astype(str))
+    all_timed = all(e in LOWER_BETTER for e in evs) if evs else False
+    y_title = "Time (seconds)" if all_timed else ("Distance (inches)" if all(e in HIGHER_BETTER for e in evs) else "Mark (numeric)")
+    y_scale = alt.Scale(reverse=all_timed)
+
+    color_field = None
+    if len(evs) > 1:
+        color_field = "event:N"
+    elif cur["gender"].nunique() > 1:
+        color_field = "gender:N"
+    elif cur["meet"].nunique() > 1:
+        color_field = "meet:N"
+
+    enc = dict(
+        x=alt.X("year:O", title="Year"),
+        y=alt.Y("value:Q", title=y_title, scale=y_scale),
+        tooltip=[
+            alt.Tooltip("year:O", title="Year"),
+            alt.Tooltip("event:N", title="Event"),
+            alt.Tooltip("gender:N", title="Gender"),
+            alt.Tooltip("meet:N", title="Meet"),
+            alt.Tooltip("name:N", title="Winner"),
+            alt.Tooltip("school:N", title="School"),
+            alt.Tooltip("mark:N", title="Mark"),
+        ],
+    )
+    if color_field:
+        enc["color"] = alt.Color(color_field)
+
+    chart = (
+        alt.Chart(cur).mark_line(point=True)
+        .encode(**enc)
+        .properties(title=title, width="container")
+    )
+    return chart
+
 # ----------------------------
 # Streamlit UI
 # ----------------------------
+
 st.set_page_config(page_title="DE HS Track & Field — Q&A + All-Time + State Records", page_icon="🏃", layout="wide")
 st.title("Delaware HS Track & Field — Q&A + All‑Time + State Records")
 
@@ -1188,7 +1163,6 @@ APP_DIR = Path(__file__).parent
 BUNDLED_XLSX_PATH = APP_DIR / "Delaware Track and Field Supersheet (6).xlsx"
 BUNDLED_ALLTIME_XLSX_PATH = APP_DIR / "Personal All-Time List.xlsx"
 
-# Optional: Indoor all-time + state records workbook (if you add one later)
 INDOOR_ALLTIME_CANDIDATES = [
     "Personal All-Time List (Indoor).xlsx",
     "Personal All-Time List - Indoor.xlsx",
@@ -1217,9 +1191,6 @@ with st.sidebar:
             df = None; mvps_df = None; KNOWN_SCHOOLS = set(); KNOWN_ATHLETES = set()
 
     st.header("All‑Time / Records")
-    # ----------------------------
-    # All‑Time / Records (Outdoor by default, optional Indoor)
-    # ----------------------------
     alltime_df = None
     state_records_df = None
     alltime_df_indoor = None
@@ -1240,7 +1211,6 @@ with st.sidebar:
             st.exception(ex)
             alltime_df = None; state_records_df = None
 
-    # Try to find an Indoor workbook too (optional)
     INDOOR_ALLTIME_XLSX_PATH = None
     for cand in INDOOR_ALLTIME_CANDIDATES:
         p = APP_DIR / cand
@@ -1303,7 +1273,7 @@ def _set_q_in_url(qval: str):
 # ----------------------------
 with tab1:
     st.subheader("Natural-language Q&A")
-    st.caption("Ask about champions, leaderboards, MVPs, last wins, **state records** (Outdoor by default; add 'indoor' to switch), **PR/PB**, and all‑time lists.")
+    st.caption("Ask about champions, leaderboards, MVPs, last wins, **state records** (Outdoor by default; add 'indoor' to switch), **PR/PB**, **school-win counts**, and **progression charts**.")
 
     if "q_prefill" not in st.session_state or not st.session_state["q_prefill"]:
         url_q = _get_q_from_url()
@@ -1311,8 +1281,8 @@ with tab1:
             st.session_state["q_prefill"] = url_q
 
     example_prompts = [
-        "Who won the boys 200 at the indoor state meet in 2026?",
-        "How many state championships did Juliana Balon win?",
+        "How many times has a Newark runner won the boys 400 at the Meet of Champions?",
+        "Show the progression of the girls 1600 at Division II since 2005.",
         "Who has won the most New Castle County Championships races?",
         "What is the girls 200 state record?",
     ]
@@ -1353,7 +1323,7 @@ with tab1:
         if fm.get("meets"):
             parts.append("**Meets:** " + ", ".join(fm["meets"]))
         if fm.get("schools"):
-            parts.append("**Schools:** " + ", ".join(fm["schools"]))
+            parts.append("**Schools (hints):** " + ", ".join(fm["schools"]))
         if fm.get("athletes"):
             parts.append("**Athletes:** " + ", ".join(fm["athletes"]))
         yf, yt = fm.get("year_from"), fm.get("year_to")
@@ -1368,12 +1338,14 @@ with tab1:
             label = {
                 "leaderboard_wins": "Leaderboard",
                 "count_titles": "Title Count",
+                "count_school_titles": "School‑win Count",
                 "mvp_lookup": "MVP Lookup",
                 "last_win_time": "Last Time",
                 "last_sweep": "Last Sweep",
                 "records_lookup": "All‑Time / Records",
                 "state_records_lookup": "State Records",
                 "personal_record": "Personal Record",
+                "progression_chart": "Progression Chart",
             }.get(intent, intent)
             parts.insert(0, f"**Intent:** {label}")
         if parts:
@@ -1387,7 +1359,7 @@ with tab1:
             sel_genders = st.multiselect("Gender", options=genders_opts, default=fm.get("genders", []))
             sel_meets   = st.multiselect("Meets", options=meets_opts,  default=fm.get("meets", []))
             sel_events  = st.multiselect("Events", options=events_opts, default=sorted(fm.get("events", [])))
-            school_txt  = st.text_input("School contains (optional)", value="; ".join(fm.get("schools", [])))
+            school_txt  = st.text_input("School contains (optional — substring)", value="; ".join(fm.get("schools", [])))
             athlete_txt = st.text_input("Athlete contains (optional)", value="; ".join(fm.get("athletes", [])))
             c1, c2 = st.columns(2)
             yf_default = int(fm["year_from"]) if fm.get("year_from") else 2000
@@ -1404,6 +1376,51 @@ with tab1:
                 fm["year_to"]   = int(yt) if yt != 2100 else fm.get("year_to")
         return fm
 
+    # Newark-vs-Newark Charter aware school filler
+    def _auto_add_schools(fm: Dict[str, Optional[str]]):
+        """Populate school filters from the raw query with Newark special rules.
+        - Full school names in the query → exact match.
+        - If 'Newark' (word) appears but not 'Newark Charter' → only exact 'Newark'/'Newark High'.
+        - 'Newark Charter' only when explicitly mentioned.
+        - Else, use substring hints for proper nouns.
+        Exposes:
+          fm['schools_exact'] for equality matches; fm['schools'] for substring when exact empty.
+        """
+        if 'schools_exact' not in fm:
+            fm['schools_exact'] = []
+        if 'KNOWN_SCHOOLS' not in globals() or not KNOWN_SCHOOLS:
+            return
+        raw = fm.get('raw') or ''
+        lowq = raw.lower()
+
+        # Full names → exact
+        for s in KNOWN_SCHOOLS:
+            if isinstance(s, str) and s.strip() and s.lower() in lowq:
+                fm['schools_exact'].append(s)
+
+        has_newark_charter = 'newark charter' in lowq
+        has_newark = bool(re.search(r'\bnewark\b', lowq))
+        if has_newark and not has_newark_charter:
+            targets = []
+            for candidate in ['Newark', 'Newark High']:
+                if candidate in KNOWN_SCHOOLS:
+                    targets.append(candidate)
+            if targets:
+                fm['schools_exact'].extend(targets)
+
+        if not fm['schools_exact'] and not fm.get('schools'):
+            tokens = re.findall(r"\b([A-Z][A-Za-z.&'-]+)\b", raw)
+            for tok in tokens:
+                if tok.lower() == 'newark' and not has_newark_charter:
+                    continue
+                if any(tok.lower() in str(s).lower() for s in KNOWN_SCHOOLS):
+                    fm.setdefault('schools', [])
+                    fm['schools'].append(tok)
+
+        fm['schools_exact'] = list(dict.fromkeys([s for s in fm['schools_exact'] if isinstance(s, str) and s.strip()]))
+        if fm.get('schools'):
+            fm['schools'] = list(dict.fromkeys([s for s in fm['schools'] if isinstance(s, str) and s.strip()]))
+
     if q and df is not None:
         f_multi = parse_question_multi(q)
 
@@ -1412,19 +1429,12 @@ with tab1:
             if ("state" in lowx) and ("indoor" not in lowx) and ("outdoor" not in lowx) and not fm["meets"]:
                 fm["meets"] = list(STATE_MEETS_ALL)
 
-        def _auto_add_schools(fm: Dict[str, Optional[str]]):
-            if not fm["schools"] and 'KNOWN_SCHOOLS' in globals() and KNOWN_SCHOOLS:
-                lowq = fm["raw"].lower()
-                for s in KNOWN_SCHOOLS:
-                    if isinstance(s, str) and s.lower() in lowq:
-                        fm["schools"].append(s)
-
         _render_understood(f_multi)
         f_multi = _edit_detected_filters_ui(f_multi, df=df, alltime_df=alltime_df)
 
-        # ---- Title count ----
+        # ---- Title count (athlete) ----
         if f_multi.get("intent") == "count_titles":
-            if not f_multi["athletes"]:
+            if 'KNOWN_ATHLETES' in globals() and KNOWN_ATHLETES and not f_multi["athletes"]:
                 lowp = f_multi["raw"].lower()
                 candidates = [n for n in KNOWN_ATHLETES if isinstance(n, str) and n.lower() in lowp]
                 if candidates:
@@ -1456,6 +1466,67 @@ with tab1:
                 show_table(rows[["gender","year","meet","event","class","school","mark"]])
             st.stop()
 
+        # ---- School-win count ----
+        if f_multi.get("intent") == "count_school_titles":
+            _auto_add_schools(f_multi)
+            if not f_multi["events"]:
+                st.info("Please specify the event (e.g., 'boys 400').")
+                st.stop()
+            if not f_multi["meets"]:
+                st.info("Please specify the meet (e.g., 'Meet of Champions').")
+                st.stop()
+            if not f_multi["genders"]:
+                st.info("Please specify the gender (e.g., 'boys' or 'girls').")
+                st.stop()
+            if not (f_multi.get("schools_exact") or f_multi.get("schools")):
+                st.info("Please mention the school/city (e.g., 'a Newark runner').")
+                st.stop()
+
+            def apply_multi_filters(df_: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
+                cur = df_.copy()
+                cur["year_num"] = pd.to_numeric(cur.get("year"), errors="coerce")
+                if f["genders"]:
+                    cur = cur[cur["gender"].isin(set(f["genders"]))]
+                if f["meets"]:
+                    cur = cur[cur["meet"].isin(set(f["meets"]))]
+                if f["events"]:
+                    cur = cur[cur["event"].isin(set(f["events"]))]
+                if f.get('schools_exact'):
+                    cur = cur[cur['school'].isin(set(f['schools_exact']))]
+                elif f.get('schools'):
+                    mask = pd.Series(False, index=cur.index)
+                    for s in f['schools']:
+                        needle = s.lower()
+                        mask = mask | cur['school'].str.lower().str.contains(needle, na=False)
+                    cur = cur[mask]
+                yf, yt = f.get("year_from"), f.get("year_to")
+                if yf and yt:
+                    cur = cur[(cur["year_num"] >= yf) & (cur["year_num"] <= yt)]
+                elif yf and not yt:
+                    cur = cur[cur["year_num"] >= yf]
+                if f.get("track_only"):
+                    cur = cur[cur["event"].isin(TRACK_EVENTS)]
+                return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
+
+            cur = apply_multi_filters(df, f_multi)
+            cur = cur[~cur["event"].isin(EVENT_GROUPS["relays"])]
+            if cur.empty:
+                st.warning("No matching wins for that school filter + event/meet/gender.")
+                with st.expander("Detected filters"):
+                    st.json(f_multi)
+                st.stop()
+
+            total = len(cur)
+            lbl_school = ", ".join(f_multi.get("schools_exact") or f_multi.get("schools") or [])
+            metric_row([("Wins", str(total)), ("School filter", lbl_school)])
+
+            st.caption("Wins by school")
+            show_table(cur.groupby("school").size().reset_index(name="wins").sort_values("wins", ascending=False))
+
+            st.caption("Matched wins")
+            show_table(cur[["gender","year","meet","event","name","school","class","mark"]].sort_values(["year","meet","event"], ascending=[False, True, True]))
+            st.stop()
+
         # ---- MVP lookup ----
         if f_multi.get("intent") == "mvp_lookup" and mvps_df is not None:
             scope_map = {"indoor": "Indoor", "outdoor": "Outdoor", "cross country": "Cross Country"}
@@ -1472,14 +1543,15 @@ with tab1:
                     mask = mask | cur["school"].str.lower().str.contains(needle, na=False)
                 cur = cur[mask]
             else:
-                lowp = f_multi["raw"].lower()
-                auto = [s for s in KNOWN_SCHOOLS if isinstance(s,str) and s.lower() in lowp]
-                if auto:
-                    mask = pd.Series(False, index=cur.index)
-                    for s in auto:
-                        needle = s.lower()
-                        mask = mask | cur["school"].str.lower().str.contains(needle, na=False)
-                    cur = cur[mask]
+                if 'KNOWN_SCHOOLS' in globals():
+                    lowp = f_multi["raw"].lower()
+                    auto = [s for s in KNOWN_SCHOOLS if isinstance(s,str) and s.lower() in lowp]
+                    if auto:
+                        mask = pd.Series(False, index=cur.index)
+                        for s in auto:
+                            needle = s.lower()
+                            mask = mask | cur["school"].str.lower().str.contains(needle, na=False)
+                        cur = cur[mask]
             yf, yt = f_multi["year_from"], f_multi["year_to"]
             if yf and yt:
                 cur = cur[(cur["season_end"] >= yf) & (cur["season_start"] <= yt)]
@@ -1495,7 +1567,7 @@ with tab1:
                     names.append(f"{nm}, {sch}" if sch else nm)
                 st.caption("MVPs")
                 st.markdown("\n".join([f"- {s}" for s in sorted(set(names))]))
-                show_table(cur.sort_values(["season_end","gender","scope"])[["gender","scope","season_label","name","school","category"]])
+                show_table(cur.sort_values(["season_end","gender","scope"]) [["gender","scope","season_label","name","school","category"]])
             st.stop()
 
         # ---- Last time ----
@@ -1509,6 +1581,32 @@ with tab1:
                 elif "state" in lowp:
                     f_multi["meets"] = list(STATE_MEETS_ALL)
             _auto_add_schools(f_multi)
+            def apply_multi_filters(df_: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
+                cur = df_.copy()
+                cur["year_num"] = pd.to_numeric(cur.get("year"), errors="coerce")
+                if f["genders"]:
+                    cur = cur[cur["gender"].isin(set(f["genders"]))]
+                if f["meets"]:
+                    cur = cur[cur["meet"].isin(set(f["meets"]))]
+                if f["events"]:
+                    cur = cur[cur["event"].isin(set(f["events"]))]
+                if f.get('schools_exact'):
+                    cur = cur[cur['school'].isin(set(f['schools_exact']))]
+                elif f.get('schools'):
+                    mask = pd.Series(False, index=cur.index)
+                    for s in f['schools']:
+                        needle = s.lower()
+                        mask = mask | cur['school'].str.lower().str.contains(needle, na=False)
+                    cur = cur[mask]
+                yf, yt = f.get("year_from"), f.get("year_to")
+                if yf and yt:
+                    cur = cur[(cur["year_num"] >= yf) & (cur["year_num"] <= yt)]
+                elif yf and not yt:
+                    cur = cur[cur["year_num"] >= yf]
+                if f.get("track_only"):
+                    cur = cur[cur["event"].isin(TRACK_EVENTS)]
+                return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
+
             cur = apply_multi_filters(df, f_multi)
             cur = cur[~cur["event"].isin(EVENT_GROUPS["relays"])]
             if cur.empty:
@@ -1580,10 +1678,102 @@ with tab1:
                 show_table(detail[["gender","year","meet","name","event","school","class","mark"]])
             st.stop()
 
+        # ---- Progression line chart ----
+        if f_multi.get("intent") == "progression_chart":
+            if not f_multi["events"]:
+                st.info("Please specify the event (e.g., 'boys 400', 'girls 1600').")
+                st.stop()
+            if not f_multi["meets"]:
+                st.info("Please specify the meet (e.g., 'Meet of Champions', 'Division II').")
+                st.stop()
+
+            def apply_multi_filters(df_: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
+                cur = df_.copy()
+                cur["year_num"] = pd.to_numeric(cur.get("year"), errors="coerce")
+                if f["genders"]:
+                    cur = cur[cur["gender"].isin(set(f["genders"]))]
+                if f["meets"]:
+                    cur = cur[cur["meet"].isin(set(f["meets"]))]
+                if f["events"]:
+                    cur = cur[cur["event"].isin(set(f["events"]))]
+                if f.get('schools_exact'):
+                    cur = cur[cur['school'].isin(set(f['schools_exact']))]
+                elif f.get('schools'):
+                    mask = pd.Series(False, index=cur.index)
+                    for s in f['schools']:
+                        needle = s.lower()
+                        mask = mask | cur['school'].str.lower().str.contains(needle, na=False)
+                    cur = cur[mask]
+                yf, yt = f.get("year_from"), f.get("year_to")
+                if yf and yt:
+                    cur = cur[(cur["year_num"] >= yf) & (cur["year_num"] <= yt)]
+                elif yf and not yt:
+                    cur = cur[cur["year_num"] >= yf]
+                if f.get("track_only"):
+                    cur = cur[cur["event"].isin(TRACK_EVENTS)]
+                return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
+
+            cur = apply_multi_filters(df, f_multi)
+            cur = cur[~cur["event"].isin(EVENT_GROUPS["relays"])]
+            if cur.empty:
+                st.warning("No matching winners to plot. Try adjusting event/meet/gender/years.")
+                with st.expander("Detected filters"):
+                    st.json(f_multi)
+                st.stop()
+
+            cur = add_numeric_mark_column(cur)
+            cur = cur.dropna(subset=["year", "value"]).sort_values(["event","gender","year"])
+
+            title_bits = []
+            if f_multi["genders"]: title_bits.append("/".join([g.title() for g in f_multi["genders"]]))
+            if f_multi["events"]:  title_bits.append(", ".join(sorted(f_multi["events"])))
+            if f_multi["meets"]:   title_bits.append(", ".join(f_multi["meets"]))
+            yf, yt = f_multi.get("year_from"), f_multi.get("year_to")
+            if yf and yt and yf == yt: title_bits.append(f"{yf}")
+            elif yf and yt:            title_bits.append(f"{yf}–{yt}")
+            elif yf:                   title_bits.append(f"since {yf}")
+            chart_title = " • ".join([s for s in title_bits if s])
+
+            chart = plot_progression(cur, chart_title or "Progression over time")
+            if chart is None:
+                st.warning("Nothing to plot after numeric conversion. (Check marks/years.)")
+                st.stop()
+            st.altair_chart(chart, use_container_width=True)
+
+            st.caption("Data points used for the chart")
+            show_table(cur[["gender","event","meet","year","name","school","mark"]])
+            st.stop()
+
         # ---- Leaderboard ----
         if f_multi.get("intent") == "leaderboard_wins":
             _apply_state_default(f_multi, f_multi["raw"])
             _auto_add_schools(f_multi)
+            def apply_multi_filters(df_: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
+                cur = df_.copy()
+                cur["year_num"] = pd.to_numeric(cur.get("year"), errors="coerce")
+                if f["genders"]:
+                    cur = cur[cur["gender"].isin(set(f["genders"]))]
+                if f["meets"]:
+                    cur = cur[cur["meet"].isin(set(f["meets"]))]
+                if f["events"]:
+                    cur = cur[cur["event"].isin(set(f["events"]))]
+                if f.get('schools_exact'):
+                    cur = cur[cur['school'].isin(set(f['schools_exact']))]
+                elif f.get('schools'):
+                    mask = pd.Series(False, index=cur.index)
+                    for s in f['schools']:
+                        needle = s.lower()
+                        mask = mask | cur['school'].str.lower().str.contains(needle, na=False)
+                    cur = cur[mask]
+                yf, yt = f.get("year_from"), f.get("year_to")
+                if yf and yt:
+                    cur = cur[(cur["year_num"] >= yf) & (cur["year_num"] <= yt)]
+                elif yf and not yt:
+                    cur = cur[cur["year_num"] >= yf]
+                if f.get("track_only"):
+                    cur = cur[cur["event"].isin(TRACK_EVENTS)]
+                return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
+
             lb = leaderboard_wins(df, f_multi)
             if f_multi.get("top_n", 10) == 1 and not lb.empty:
                 row = lb.iloc[0]
@@ -1592,7 +1782,7 @@ with tab1:
                 wins_rows = cur[
                     (cur["name"] == row["name"]) &
                     (cur["school"] == row["school"]) &
-                    (cur["gender"] == row["gender"])
+                    (cur["gender"] == row["gender"]) 
                 ].sort_values(["year","meet","event"], ascending=[False, True, True])
                 if not wins_rows.empty:
                     st.caption("That athlete’s wins (matching your filters)")
@@ -1606,7 +1796,7 @@ with tab1:
                 show_table(lb.reset_index(drop=True)[["gender","name","school","wins"]])
             st.stop()
 
-        # ---- State Records (first sheet; season-aware) ----
+        # ---- State Records (season-aware) ----
         if f_multi.get("intent") == "state_records_lookup":
             scope = (f_multi.get("scope") or "").lower()
             use_df = None
@@ -1629,7 +1819,7 @@ with tab1:
             if f_multi["genders"]:
                 cur = cur[cur["gender"].isin(f_multi["genders"])]
             if f_multi["events"]:
-                cur = cur[cur["event"].isin(f_multi["events"])]
+                cur = cur[cur["event"].isin(f_multi["events"]) ]
 
             if cur.empty:
                 st.warning("No state-record entries matched your filters. Try specifying gender and event (e.g., 'Girls 400 state record').")
@@ -1767,6 +1957,33 @@ with tab1:
         if ({"100/55","100/55H","110/55H"} & f_multi["events"]) and not f_multi["meets"]:
             f_multi["meets"] = list(STATE_MEETS_INDOOR)
         _auto_add_schools(f_multi)
+
+        def apply_multi_filters(df_: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
+            cur = df_.copy()
+            cur["year_num"] = pd.to_numeric(cur.get("year"), errors="coerce")
+            if f["genders"]:
+                cur = cur[cur["gender"].isin(set(f["genders"]))]
+            if f["meets"]:
+                cur = cur[cur["meet"].isin(set(f["meets"]))]
+            if f["events"]:
+                cur = cur[cur["event"].isin(set(f["events"]))]
+            if f.get('schools_exact'):
+                cur = cur[cur['school'].isin(set(f['schools_exact']))]
+            elif f.get('schools'):
+                mask = pd.Series(False, index=cur.index)
+                for s in f['schools']:
+                    needle = s.lower()
+                    mask = mask | cur['school'].str.lower().str.contains(needle, na=False)
+                cur = cur[mask]
+            yf, yt = f.get("year_from"), f.get("year_to")
+            if yf and yt:
+                cur = cur[(cur["year_num"] >= yf) & (cur["year_num"] <= yt)]
+            elif yf and not yt:
+                cur = cur[cur["year_num"] >= yf]
+            if f.get("track_only"):
+                cur = cur[cur["event"].isin(TRACK_EVENTS)]
+            return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
+
         result = apply_multi_filters(df, f_multi)
         if result.empty:
             st.error("No matches found. Try adjusting events/meets/schools/years.")
@@ -1948,7 +2165,6 @@ with tab5:
 with tab6:
     st.subheader("State Records")
 
-    # Season switcher (Outdoor default, Indoor only if available)
     has_indoor = 'state_records_df_indoor' in globals() and state_records_df_indoor is not None and not state_records_df_indoor.empty
     season = st.radio("Season", options=( ["Outdoor", "Indoor"] if has_indoor else ["Outdoor"] ), horizontal=True, index=0)
 
@@ -1956,7 +2172,6 @@ with tab6:
     if cur_df is None or cur_df.empty:
         st.info(f"State records sheet not loaded or empty for {season}.")
     else:
-        # Guarantee display events are whole-number when appropriate
         cur_df = cur_df.copy()
         cur_df["event"] = cur_df["event"].astype(str).str.replace(r"\.0$", "", regex=True)
 
@@ -1974,7 +2189,6 @@ with tab6:
         elif g_pick == "Boys":
             cur = cur[cur["gender"] == "BOYS"]
 
-        # If a specific event selected: show nicely formatted cards for Boys/Girls
         if ev_pick != "(choose event)":
             c_b, c_g = st.columns(2)
             boys = cur[cur["gender"] == "BOYS"].sort_values("event").head(1)
@@ -2010,7 +2224,6 @@ with tab6:
             st.divider()
 
         st.caption(f"Full state records table — {season}")
-        # Remove 'athletes' column from display as requested
         display_cols = [c for c in ["gender","event","mark","name","school","meet","location","year"] if c in cur.columns]
         show_table(cur[display_cols])
 
