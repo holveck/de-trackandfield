@@ -1,6 +1,7 @@
 # streamlit_app.py
 # ---------------------------------------------------------
-# Delaware HS Track & Field — Natural-language Q&A + All-Time + State Records
+# Delaware Online Sports Compendium
+# (Delaware HS Track & Field — Natural-language Q&A + All-Time + State Records)
 #
 # Bundled data:
 #   • Champions workbook: "Delaware Track and Field Supersheet (6).xlsx"
@@ -11,20 +12,15 @@
 #       - "Personal All-Time List_Indoor.xlsx"
 #       - "Indoor Personal All-Time List.xlsx"
 #
-# Patch rollup:
-#   • Robust state-records parser with numeric event normalization (100.0 → 100)
-#   • Season-aware "🏅 State Records" routing (Outdoor default; Indoor if asked & available)
-#   • "🏅 State Records" tab lists events as whole numbers
-#   • Queries like “What is the girls 200 state record?” resolve correctly
-#   • Decade-aware year parsing (1980s/1990s/2000s; early/mid/late; before/after/since; 2008–09)
-#   • Boundary-aware event detection (no more 200 from “2000s”/“2004”)
-#   • Apostrophe normalization in queries
-#   • Consistent year dtype + robust filtering
-#   • Newark-vs-Newark Charter exact-match rule for school-win counts
-#   • Progression / trend line chart intent & plotting
-#   • NEW (this patch): Auto-tight Y-axis for progression charts + flipped so faster times appear higher
-#   • NEW (this patch): Removed mini "Wins by Year" chart from Last Time lookups (rest unchanged)
-#   • NEW (this patch): Optional fine-tuning scaffold for per-event Y-axis overrides
+# Features:
+#   • Robust state-records parser with numeric event normalization
+#   • Season-aware State Records (Outdoor default; Indoor if asked & available)
+#   • Decade-aware year parsing; boundary-aware event detection
+#   • PR/PB, all‑time lists, leaderboard, last‑time, sweeps
+#   • Newark vs Newark Charter exact-match for school-win counts
+#   • Progression charts with tight Y-axis and flipped for timed events
+#   • NEW: Athlete-specific win count intent (e.g., “How many times has DeMario Morgan won …”) 
+#   • NEW: Title count UI — athlete name displayed large to the left of the Titles metric
 
 import io
 import re
@@ -412,7 +408,7 @@ def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
         gender = "GIRLS" if gender_txt.startswith("GIRL") else "BOYS"
         event_raw = m.group(2).strip()
         event_norm_guess = re.sub(r"[,\s]+", " ", event_raw).strip()
-        event_norm_guess = event_norm_guess.replace("1,600", "1600").replace("3,200", "3200").replace(",", "")
+        event_norm_guess = event_norm_guess.replace(",", "").replace("1,600","1600").replace("3,200","3200")
         event_canonical = canonical_event(event_norm_guess, gender=None) or event_norm_guess
 
         hdr_row = find_header_row(ws)
@@ -961,7 +957,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         (("fastest" in low or "best" in low) and "'" in low)):
         out["intent"] = "personal_record"
 
-    # Title Count (athlete)
+    # Title Count (athlete across specified meets scope)
     if re.search(r"\bhow many\b.*\b(championships?|titles?)\b", low):
         out["intent"] = "count_titles"
         if "state" in low:
@@ -970,6 +966,10 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
             out["scope"] = "indoor"
         if "outdoor" in low:
             out["scope"] = "outdoor"
+
+    # Athlete-specific wins (e.g., How many times has DeMario Morgan won ...)
+    if re.search(r"\bhow many\b.*\b(times|wins?)\b.*\b(has|did)\b.*\bwon\b", low):
+        out["intent"] = "count_athlete_wins"
 
     # School-win count
     if re.search(r"\bhow many\b.*\brunner\b.*\bwon\b", low) or re.search(r"\bhow many\b.*\bwins\b.*\b(for|by)\b", low):
@@ -1092,14 +1092,6 @@ def plot_timeline_year_counts(df: pd.DataFrame, *, title: str, year_col: str = "
     return c
 
 # -------- Optional Fine-tuning (Y-axis overrides) --------
-# Provide override domains for specific (gender, event) pairs if desired.
-# Leave this dict empty to rely purely on automatic tight-scaling.
-# Example (uncomment to use):
-# TIGHT_Y_OVERRIDES = {
-#     ("BOYS", "400"): (45.0, 53.0),
-#     ("GIRLS", "400"): (52.0, 60.0),
-#     (None,  "1600"): (250.0, 360.0),  # applies to both genders if gender-specific not provided
-# }
 TIGHT_Y_OVERRIDES: Dict[Tuple[Optional[str], str], Tuple[float, float]] = {}
 
 
@@ -1108,7 +1100,6 @@ def _find_override_domain(cur: pd.DataFrame) -> Optional[Tuple[float, float]]:
         return None
     genders = set(cur.get("gender", pd.Series(dtype=str)).dropna().astype(str))
     events  = set(cur.get("event", pd.Series(dtype=str)).dropna().astype(str))
-    # Prefer (gender,event) exact; fallback to (None,event)
     for ev in events:
         for g in genders or {None}:
             key = (g, ev)
@@ -1158,14 +1149,12 @@ def plot_progression(cur: pd.DataFrame, title: str = "Progression over time"):
 
     y_title = "Time (seconds)" if is_all_timed else ("Distance (inches)" if is_all_field else "Mark (numeric)")
 
-    # Determine domain: override > tight from data
     override_dom = _find_override_domain(cur)
     if override_dom:
         y_domain = list(override_dom)
     else:
         y_domain = _tight_y_domain(cur["value"], is_timed=is_all_timed)
 
-    # Flip Y for timed events so faster (smaller) values appear higher
     y_scale = alt.Scale(reverse=is_all_timed, domain=y_domain)
 
     color_field = None
@@ -1203,8 +1192,8 @@ def plot_progression(cur: pd.DataFrame, title: str = "Progression over time"):
 # Streamlit UI
 # ----------------------------
 
-st.set_page_config(page_title="DE HS Track & Field — Q&A + All-Time + State Records", page_icon="🏃", layout="wide")
-st.title("Delaware HS Track & Field — Q&A + All‑Time + State Records")
+st.set_page_config(page_title="Delaware Online Sports Compendium", page_icon="🏃", layout="wide")
+st.title("Delaware Online Sports Compendium")
 
 APP_DIR = Path(__file__).parent
 BUNDLED_XLSX_PATH = APP_DIR / "Delaware Track and Field Supersheet (6).xlsx"
@@ -1319,7 +1308,7 @@ def _set_q_in_url(qval: str):
 # Q&A
 # ----------------------------
 with tab1:
-    st.subheader("Natural-language Q&A")
+    # Remove the previous subheader line per request (no 'Natural-language Q&A')
     st.caption("Ask about champions, leaderboards, MVPs, last wins, **state records** (Outdoor by default; add 'indoor' to switch), **PR/PB**, and all‑time lists.")
 
     if "q_prefill" not in st.session_state or not st.session_state["q_prefill"]:
@@ -1327,7 +1316,7 @@ with tab1:
         if url_q:
             st.session_state["q_prefill"] = url_q
 
-    # Preserve original quick examples (do not change without request)
+    # Preserve original quick examples
     example_prompts = [
         "Who won the boys 200 at the indoor state meet in 2026?",
         "How many state championships did Juliana Balon win?",
@@ -1387,6 +1376,7 @@ with tab1:
                 "leaderboard_wins": "Leaderboard",
                 "count_titles": "Title Count",
                 "count_school_titles": "School‑win Count",
+                "count_athlete_wins": "Athlete‑win Count",
                 "mvp_lookup": "MVP Lookup",
                 "last_win_time": "Last Time",
                 "last_sweep": "Last Sweep",
@@ -1424,28 +1414,17 @@ with tab1:
                 fm["year_to"]   = int(yt) if yt != 2100 else fm.get("year_to")
         return fm
 
-    # Newark-vs-Newark Charter aware school filler
+    # Newark vs Newark Charter aware school filler
     def _auto_add_schools(fm: Dict[str, Optional[str]]):
-        """Populate school filters from the raw query with Newark special rules.
-        - Full school names in the query → exact match.
-        - If 'Newark' (word) appears but not 'Newark Charter' → only exact 'Newark'/'Newark High'.
-        - 'Newark Charter' only when explicitly mentioned.
-        - Else, use substring hints for proper nouns.
-        Exposes:
-          fm['schools_exact'] for equality matches; fm['schools'] for substring when exact empty.
-        """
         if 'schools_exact' not in fm:
             fm['schools_exact'] = []
         if 'KNOWN_SCHOOLS' not in globals() or not KNOWN_SCHOOLS:
             return
         raw = fm.get('raw') or ''
         lowq = raw.lower()
-
-        # Full names → exact
         for s in KNOWN_SCHOOLS:
             if isinstance(s, str) and s.strip() and s.lower() in lowq:
                 fm['schools_exact'].append(s)
-
         has_newark_charter = 'newark charter' in lowq
         has_newark = bool(re.search(r'\bnewark\b', lowq))
         if has_newark and not has_newark_charter:
@@ -1455,7 +1434,6 @@ with tab1:
                     targets.append(candidate)
             if targets:
                 fm['schools_exact'].extend(targets)
-
         if not fm['schools_exact'] and not fm.get('schools'):
             tokens = re.findall(r"\b([A-Z][A-Za-z.&'-]+)\b", raw)
             for tok in tokens:
@@ -1464,7 +1442,6 @@ with tab1:
                 if any(tok.lower() in str(s).lower() for s in KNOWN_SCHOOLS):
                     fm.setdefault('schools', [])
                     fm['schools'].append(tok)
-
         fm['schools_exact'] = list(dict.fromkeys([s for s in fm['schools_exact'] if isinstance(s, str) and s.strip()]))
         if fm.get('schools'):
             fm['schools'] = list(dict.fromkeys([s for s in fm['schools'] if isinstance(s, str) and s.strip()]))
@@ -1480,7 +1457,7 @@ with tab1:
         _render_understood(f_multi)
         f_multi = _edit_detected_filters_ui(f_multi, df=df, alltime_df=alltime_df)
 
-        # ---- Title count (athlete) ----
+        # ---- Title count (athlete across meets scope) ----
         if f_multi.get("intent") == "count_titles":
             if 'KNOWN_ATHLETES' in globals() and KNOWN_ATHLETES and not f_multi["athletes"]:
                 lowp = f_multi["raw"].lower()
@@ -1501,7 +1478,14 @@ with tab1:
             genders_to_check = f_multi["genders"] if f_multi["genders"] else guess_gender_for_name(df, athlete)
             df_scope = df[df["gender"].isin(genders_to_check)]
             total_count, rows = title_count(df_scope, athlete, include_meets=include_meets, include_relays=False)
-            metric_row([("Titles", str(total_count))])
+
+            # NEW UI: Show large athlete name to the left of Titles metric
+            c_name, c_metric = st.columns([0.6, 0.4])
+            with c_name:
+                st.markdown(f"<div style='font-size:1.6rem;font-weight:700;line-height:1.2'>{athlete}</div>", unsafe_allow_html=True)
+            with c_metric:
+                metric_row([("Titles", str(total_count))])
+
             if total_count > 0:
                 timeline_chart = plot_timeline_year_counts(rows[["year"]].dropna(), title="Titles by year")
                 if timeline_chart is not None:
@@ -1512,6 +1496,51 @@ with tab1:
                 with c3: st.caption("By year");  show_table(rows.groupby("year").size().reset_index(name="titles").sort_values("year"))
                 st.caption("Title rows (relays excluded)")
                 show_table(rows[["gender","year","meet","event","class","school","mark"]])
+            st.stop()
+
+        # ---- Athlete-specific win count (event/meet/gender constrained) ----
+        if f_multi.get("intent") == "count_athlete_wins":
+            # Need an athlete, plus filters (gender/event/meet). We'll infer athlete from text if not quoted
+            if 'KNOWN_ATHLETES' in globals() and KNOWN_ATHLETES and not f_multi["athletes"]:
+                lowp = f_multi["raw"].lower()
+                candidates = [n for n in KNOWN_ATHLETES if isinstance(n, str) and n.lower() in lowp]
+                if candidates:
+                    f_multi["athletes"] = sorted(set(candidates), key=lambda s: (-len(s), s))
+            if not f_multi["athletes"]:
+                st.info('Please include the athlete’s full name, e.g., “How many times has "DeMario Morgan" won the boys 400 at the Meet of Champions?”')
+                st.stop()
+            athlete = f_multi["athletes"][0]
+            # Require at least event and meet to be precise
+            if not f_multi["events"]:
+                st.info("Please specify the event (e.g., 'boys 400').")
+                st.stop()
+            if not f_multi["meets"]:
+                st.info("Please specify the meet (e.g., 'Meet of Champions').")
+                st.stop()
+            genders_to_check = f_multi["genders"] if f_multi["genders"] else guess_gender_for_name(df, athlete)
+            cur = df.copy()
+            cur["name_norm"] = cur["name"].apply(normalize_name)
+            athlete_norm = normalize_name(athlete)
+            cur = cur[cur["name_norm"] == athlete_norm]
+            cur = cur[cur["gender"].isin(set(genders_to_check))]
+            cur = cur[cur["event"].isin(set(f_multi["events"]))]
+            cur = cur[cur["meet"].isin(set(f_multi["meets"]))]
+            # Optional years
+            yf, yt = f_multi.get("year_from"), f_multi.get("year_to")
+            cur["year_num"] = pd.to_numeric(cur.get("year"), errors="coerce")
+            if yf and yt:
+                cur = cur[(cur["year_num"] >= yf) & (cur["year_num"] <= yt)]
+            elif yf and not yt:
+                cur = cur[cur["year_num"] >= yf]
+            total = len(cur)
+
+            # Counter at the top (metric style like Titles)
+            metric_row([("Wins", str(total))])
+            if total > 0:
+                st.caption("Matched wins")
+                show_table(cur[["gender","year","meet","event","name","school","class","mark"]].sort_values(["year","event"], ascending=[False, True]))
+            else:
+                st.info("No wins found matching the athlete + event + meet filters.")
             st.stop()
 
         # ---- School-win count ----
@@ -1558,15 +1587,14 @@ with tab1:
 
             cur = apply_multi_filters(df, f_multi)
             cur = cur[~cur["event"].isin(EVENT_GROUPS["relays"])]
+            total = len(cur)
+            # Counter at top (metric style)
+            metric_row([("Wins", str(total))])
             if cur.empty:
                 st.warning("No matching wins for that school filter + event/meet/gender.")
                 with st.expander("Detected filters"):
                     st.json(f_multi)
                 st.stop()
-
-            total = len(cur)
-            lbl_school = ", ".join(f_multi.get("schools_exact") or f_multi.get("schools") or [])
-            metric_row([("Wins", str(total)), ("School filter", lbl_school)])
 
             st.caption("Wins by school")
             show_table(cur.groupby("school").size().reset_index(name="wins").sort_values("wins", ascending=False))
@@ -1674,7 +1702,7 @@ with tab1:
                     ("School", str(r0["school"])),
                 ],
             )
-            # Removed the 'Wins by Year' bar chart per request.
+            # Note: per request the 'Wins by Year' bar chart was removed earlier.
             if len(latest_rows) > 1:
                 st.caption("All matching winners in that year")
                 show_table(latest_rows[["gender","year","meet","event","name","school","class","mark"]])
