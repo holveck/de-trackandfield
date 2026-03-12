@@ -11,11 +11,15 @@
 #       - "Personal All-Time List_Indoor.xlsx"
 #       - "Indoor Personal All-Time List.xlsx"
 #
-# New in this version:
+# New in this version (patch rollup):
 #   • Robust state-records parser with numeric event normalization (100.0 → 100)
 #   • Season-aware "🏅 State Records" routing (Outdoor default; Indoor if asked & available)
 #   • "🏅 State Records" tab lists events as whole numbers
 #   • Queries like “What is the girls 200 state record?” resolve correctly
+#   • ✨ FIX: Decade-aware year parsing (1980s/1990s/2000s; early/mid/late; before/after/since)
+#   • ✨ FIX: Boundary-aware event detection (no more 200 from “2000s” or 2004)
+#   • ✨ FIX: Shorthand year-range like 2008–09
+#   • ✨ IMPROVE: Normalize apostrophes in queries; consistent year dtype and filtering
 #
 # Tweaks in this patch:
 #   • Year values show as whole numbers (e.g., 2017) in record responses
@@ -131,6 +135,7 @@ STATE_MEETS_ALL = STATE_MEETS_OUTDOOR | STATE_MEETS_INDOOR
 # ----------------------------
 # Champions parsing
 # ----------------------------
+
 def detect_year_bundles(ws) -> List[Tuple[int, int]]:
     bundles: List[Tuple[int, int]] = []
     col = 1
@@ -143,6 +148,7 @@ def detect_year_bundles(ws) -> List[Tuple[int, int]]:
         else:
             col += 1
     return bundles
+
 
 def normalize_event_label(raw) -> Optional[str]:
     if raw is None:
@@ -160,13 +166,16 @@ def normalize_event_label(raw) -> Optional[str]:
         return s
     return s
 
+
 def canonical_meet(token: str) -> Optional[str]:
     low = token.strip().lower()
     if low in MEET_CANONICAL:
         return MEET_CANONICAL[low]
     choice = difflib.get_close_matches(low, list(MEET_CANONICAL.keys()), n=1, cutoff=0.85)
-    if choice: return MEET_CANONICAL[choice[0]]
+    if choice:
+        return MEET_CANONICAL[choice[0]]
     return None
+
 
 def parse_champions_sheet(ws, gender: str) -> pd.DataFrame:
     year_bundles = detect_year_bundles(ws)
@@ -205,6 +214,7 @@ def parse_champions_sheet(ws, gender: str) -> pd.DataFrame:
                     )
     return pd.DataFrame.from_records(records)
 
+
 @st.cache_data(show_spinner=False)
 def load_champions(file_bytes: bytes) -> pd.DataFrame:
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
@@ -212,6 +222,8 @@ def load_champions(file_bytes: bytes) -> pd.DataFrame:
     boys_df = parse_champions_sheet(wb["BOYS"], "BOYS")
     out = pd.concat([girls_df, boys_df], ignore_index=True)
     out["event"] = out["event"].astype(str).str.replace(r"\.0$", "", regex=True)
+    # Ensure year is numeric and consistent for filtering
+    out["year"] = pd.to_numeric(out["year"], errors="coerce").astype("Int64")
     return out
 
 # ----------------------------
@@ -226,6 +238,7 @@ MVP_CATEGORY_MAP = {
     "Boys Cross Country": ("BOYS", "Cross Country"),
 }
 
+
 def _find_header_row(ws) -> Optional[int]:
     maxr = ws.max_row
     for r in range(1, min(maxr, 50) + 1):
@@ -237,25 +250,30 @@ def _find_header_row(ws) -> Optional[int]:
                 return r
     return None
 
+
 def _parse_season_label(lbl) -> Tuple[Optional[int], Optional[int], Optional[str]]:
     if lbl is None:
         return None, None, None
     try:
         import datetime as _dt
         if isinstance(lbl, (_dt.datetime, _dt.date)):
-            y = int(lbl.year); return y, y, str(y)
+            y = int(lbl.year)
+            return y, y, str(y)
     except Exception:
         pass
     s = str(lbl).strip()
     m = re.match(r"^(20\d{2})\s*[-/]\s*(\d{2}|\d{4})$", s)
     if m:
-        y1 = int(m.group(1)); y2txt = m.group(2)
+        y1 = int(m.group(1))
+        y2txt = m.group(2)
         y2 = int(y2txt) if len(y2txt) == 4 else int(str(y1)[:2] + y2txt)
         return y1, y2, f"{y1}-{str(y2)[-2:]}"
     m2 = re.match(r"^(20\d{2})$", s)
     if m2:
-        y = int(m2.group(1)); return y, y, s
+        y = int(m2.group(1))
+        return y, y, s
     return None, None, None
+
 
 @st.cache_data(show_spinner=False)
 def load_mvps(file_bytes: bytes) -> pd.DataFrame:
@@ -275,7 +293,8 @@ def load_mvps(file_bytes: bytes) -> pd.DataFrame:
     cat_cols: Dict[str, Tuple[int, int]] = {}
     for c in range(1, ws.max_column + 1):
         v = ws.cell(row=header_row, column=c).value
-        if not v: continue
+        if not v:
+            continue
         label = str(v).strip()
         if label.lower() == "year":
             year_col = c
@@ -326,8 +345,10 @@ LOWER_BETTER = {
 }
 HIGHER_BETTER = {"LJ","TJ","HJ","PV","Shot put","Discus"}
 
+
 def _parse_time_to_seconds(txt: str) -> Optional[float]:
-    if txt is None: return None
+    if txt is None:
+        return None
     s = str(txt).strip()
     s = re.sub(r"[a-zA-Z]+$", "", s).strip()
     try:
@@ -335,25 +356,31 @@ def _parse_time_to_seconds(txt: str) -> Optional[float]:
             return float(s)
         parts = [p.strip() for p in s.split(":")]
         if len(parts) == 2:
-            m, sec = parts; return 60.0*float(m) + float(sec)
+            m, sec = parts
+            return 60.0*float(m) + float(sec)
         if len(parts) == 3:
-            h, m, sec = parts; return 3600.0*float(h) + 60.0*float(m) + float(sec)
+            h, m, sec = parts
+            return 3600.0*float(h) + 60.0*float(m) + float(sec)
     except Exception:
         return None
     return None
 
+
 def _parse_distance_to_float(txt: str) -> Optional[float]:
-    if txt is None: return None
+    if txt is None:
+        return None
     s = str(txt).strip().lower()
     s = re.sub(r"[a-z]+$", "", s).strip()
     m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$", s)
     if m:
-        feet = float(m.group(1)); inches = float(m.group(2))
+        feet = float(m.group(1))
+        inches = float(m.group(2))
         return feet*12.0 + inches
     try:
         return float(s)
     except Exception:
         return None
+
 
 def _mark_sort_key(ev: str, mark: str):
     if ev in LOWER_BETTER:
@@ -415,7 +442,8 @@ def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
         perf_col = None
         for cand in ["time/mark","time","mark"]:
             if cand in df.columns:
-                perf_col = cand; break
+                perf_col = cand
+                break
         if perf_col is None:
             perf_col = next((c for c in df.columns if c.replace(" ", "") in {"time","mark","time/mark"}), None)
         if perf_col is None:
@@ -424,15 +452,24 @@ def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
         rename_map = {}
         for c in df.columns:
             lc = c.lower().strip()
-            if lc in {"time/mark","time","mark"}: rename_map[c] = "mark"
-            elif lc in {"name","athlete"}:        rename_map[c] = "name"
-            elif lc == "school":                  rename_map[c] = "school"
-            elif lc == "meet":                    rename_map[c] = "meet"
-            elif lc == "date":                    rename_map[c] = "date"
-            elif lc == "location":                rename_map[c] = "location"
-            elif lc in {"wind reading","wind"}:   rename_map[c] = "wind"
-            elif lc == "athletes":                rename_map[c] = "athletes"
-            elif lc in {"rank", "#", "no", "number"}: rename_map[c] = "rank"
+            if lc in {"time/mark","time","mark"}:
+                rename_map[c] = "mark"
+            elif lc in {"name","athlete"}:
+                rename_map[c] = "name"
+            elif lc == "school":
+                rename_map[c] = "school"
+            elif lc == "meet":
+                rename_map[c] = "meet"
+            elif lc == "date":
+                rename_map[c] = "date"
+            elif lc == "location":
+                rename_map[c] = "location"
+            elif lc in {"wind reading","wind"}:
+                rename_map[c] = "wind"
+            elif lc == "athletes":
+                rename_map[c] = "athletes"
+            elif lc in {"rank", "#", "no", "number"}:
+                rename_map[c] = "rank"
             else:
                 rename_map[c] = c
         df = df.rename(columns=rename_map)
@@ -477,6 +514,7 @@ def load_alltime(file_bytes: bytes, file_type: str = "xlsx") -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 # ---- New: event normalization helper for state-records ----
+
 def normalize_event_text_for_records(raw) -> Optional[str]:
     """
     Normalize event labels from the state-records first sheet:
@@ -507,6 +545,7 @@ def normalize_event_text_for_records(raw) -> Optional[str]:
         return canonical_event(maybe, None) or maybe
 
     return s
+
 
 @st.cache_data(show_spinner=False)
 def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
@@ -585,7 +624,7 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
                 # Map relay athletes to the NAME field; keep SCHOOL in the SCHOOL field
                 school = clean_txt(side_cols[1])
                 athletes = clean_txt(side_cols[2])
-                name = athletes  # <-- key change
+                name = athletes  # key change
                 meet = clean_txt(side_cols[3])
                 location = clean_txt(side_cols[4])
                 date = side_cols[5]
@@ -632,19 +671,22 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
 # ----------------------------
 # Athlete/title utilities
 # ----------------------------
+
 def normalize_name(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower()) if isinstance(s, str) else ""
+
 
 @st.cache_data(show_spinner=False)
 def all_athletes_index(df: pd.DataFrame) -> pd.DataFrame:
     tmp = df.copy()
     tmp["name_norm"] = tmp["name"].apply(normalize_name)
     schools = (
-        tmp.groupby(["gender", "name", "name_norm"])["school"]
+        tmp.groupby(["gender", "name", "name_norm"])['school']
         .apply(lambda x: ", ".join(sorted({s for s in x.dropna()})))
         .reset_index(name="schools")
     )
     return schools.sort_values(["gender", "name"]).reset_index(drop=True)
+
 
 def title_count(df: pd.DataFrame, athlete_name: str, *, include_meets: set, include_relays: bool = False) -> Tuple[int, pd.DataFrame]:
     nn = normalize_name(athlete_name)
@@ -656,6 +698,7 @@ def title_count(df: pd.DataFrame, athlete_name: str, *, include_meets: set, incl
         cur = cur[~cur["event"].isin({"4x100", "4x200", "4x400", "4x800"})]
     return len(cur), cur.sort_values(["year", "meet", "event"])
 
+
 def guess_gender_for_name(df: pd.DataFrame, athlete_name: str) -> List[str]:
     nn = normalize_name(athlete_name)
     g = df.assign(name_norm=df["name"].apply(normalize_name))
@@ -665,17 +708,20 @@ def guess_gender_for_name(df: pd.DataFrame, athlete_name: str) -> List[str]:
 # ----------------------------
 # Table + Rendering helpers
 # ----------------------------
+
 def _format_gender_values(df: pd.DataFrame) -> pd.DataFrame:
     if "gender" in df.columns:
         df = df.copy()
         df["gender"] = df["gender"].map({"GIRLS": "Girls", "BOYS": "Boys"}).fillna(df["gender"])
     return df
 
+
 def _reorder_gender_first(df: pd.DataFrame) -> pd.DataFrame:
     if "gender" in df.columns:
         cols = ["gender"] + [c for c in df.columns if c != "gender"]
         return df[cols]
     return df
+
 
 def _pretty_headers(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -684,6 +730,7 @@ def _pretty_headers(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [c[:1].upper() + c[1:] if c else c for c in df.columns]
     return df
+
 
 def show_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     if df is None:
@@ -697,11 +744,13 @@ def show_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     cur = _pretty_headers(cur)
     st.dataframe(cur, use_container_width=True, hide_index=True)
 
+
 def _format_rank_as_string(df: pd.DataFrame) -> pd.DataFrame:
     if "rank" in df.columns:
         s = pd.to_numeric(df["rank"], errors="coerce")
         df["rank"] = s.apply(lambda v: "" if pd.isna(v) else str(int(v)))
     return df
+
 
 def show_alltime_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     if df is None:
@@ -709,9 +758,11 @@ def show_alltime_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     cur = df.copy()
     cur = _format_rank_as_string(cur)
     default_cols = []
-    if "rank" in cur.columns: default_cols.append("rank")
+    if "rank" in cur.columns:
+        default_cols.append("rank")
     default_cols += ["gender","event","mark","name","school","year","meet"]
-    if "location" in cur.columns: default_cols.append("location")
+    if "location" in cur.columns:
+        default_cols.append("location")
     if cols:
         for c in cols:
             if c in cur.columns and c not in default_cols:
@@ -722,16 +773,19 @@ def show_alltime_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     cur = _pretty_headers(cur)
     st.dataframe(cur, use_container_width=True, hide_index=True)
 
+
 def top1_card(name: str, school: str, gender: str, wins: int, context: str = ""):
     with st.container(border=True):
         st.markdown(f"**{name}** — {school}")
         st.markdown(f"🏆 **{int(wins)}** wins")
+
 
 def info_card(title: str, lines: List[Tuple[str, str]]):
     with st.container(border=True):
         st.markdown(f"**{title}**")
         for k, v in lines:
             st.markdown(f"- **{k}:** {v}")
+
 
 def metric_row(metrics: List[Tuple[str, str]]):
     cols = st.columns(len(metrics))
@@ -741,17 +795,24 @@ def metric_row(metrics: List[Tuple[str, str]]):
 # ----------------------------
 # NL helpers + multi-condition parsing & leaderboards
 # ----------------------------
+
 def canonical_event(event_text: str, gender: Optional[str]) -> Optional[str]:
     t = event_text.strip().lower()
-    if t in EVENT_CANONICAL: return EVENT_CANONICAL[t]
+    if t in EVENT_CANONICAL:
+        return EVENT_CANONICAL[t]
     if "hurd" in t or t in {"55h", "110h", "100h"}:
-        if gender == "GIRLS": return "100/55H"
-        if gender == "BOYS":  return "110/55H"
-        if "55" in t:         return "100/55H"
-    if t in {"55", "55m"}: return "100/55"
+        if gender == "GIRLS":
+            return "100/55H"
+        if gender == "BOYS":
+            return "110/55H"
+        if "55" in t:
+            return "100/55H"
+    if t in {"55", "55m"}:
+        return "100/55"
     keys = list({v.lower(): v for v in EVENT_CANONICAL.values()}.keys())
     m = difflib.get_close_matches(t, keys, n=1, cutoff=0.8)
     return EVENT_CANONICAL[m[0]] if m else None
+
 
 def _tokenize_phrases(q: str) -> List[str]:
     s = q.lower()
@@ -760,56 +821,187 @@ def _tokenize_phrases(q: str) -> List[str]:
     parts = [p.strip() for p in s.split(",") if p.strip()]
     return parts
 
+
 def _expand_event_groups(words: List[str]) -> set:
     out = set()
     for w in words:
         w = w.strip().lower()
         g = EVENT_GROUP_SYNONYMS.get(w) or (w if w in EVENT_GROUPS else None)
         if g and g in EVENT_GROUPS:
-            out |= EVENT_GROUPS[g]; continue
+            out |= EVENT_GROUPS[g]
+            continue
         ev = canonical_event(w, None)
-        if ev: out.add(ev)
+        if ev:
+            out.add(ev)
     return out
 
+
 def _find_multi_targets(q: str, vocabulary: Dict[str, str]) -> List[str]:
-    toks = _tokenize_phrases(q); found = []
+    toks = _tokenize_phrases(q)
+    found = []
     keys = sorted(vocabulary.keys(), key=len, reverse=True)
     for t in toks:
         for k in keys:
             if k in t:
-                found.append(vocabulary[k]); break
-    seen=set(); ordered=[]
+                found.append(vocabulary[k])
+                break
+    seen = set()
+    ordered = []
     for x in found:
         if x not in seen:
-            seen.add(x); ordered.append(x)
+            seen.add(x)
+            ordered.append(x)
     return ordered
 
+# --- PATCH: decade-aware ranges and before/after operators ---
+DECADE_OFFSETS = {
+    "early": (0, 4),
+    "mid":   (3, 7),
+    "late":  (5, 9),
+}
+
+
 def _extract_year_range(q: str) -> Tuple[Optional[int], Optional[int]]:
-    low = q.lower()
-    m = re.search(r"(?:between|from)\s*(20\d{2})\s*(?:and|to|-)\s*(20\d{2})", low)
-    if m: a, b = int(m.group(1)), int(m.group(2)); return (min(a,b), max(a,b))
-    m = re.search(r"\b(since|after|from)\s*(20\d{2})\b", low)
-    if m: return (int(m.group(2)), None)
-    m = re.search(r"\bin\s*(20\d{2})\b", low)
-    if m: return (int(m.group(1)), int(m.group(1)))
-    yrs = [int(y) for y in re.findall(r"\b(20\d{2})\b", low)]
-    if len(yrs) == 1: return (yrs[0], yrs[0])
-    if len(yrs) >= 2: return (min(yrs[:2]), max(yrs[:2]))
+    low = q.lower().replace("’", "'")
+
+    # Shorthand like "2008-09" -> 2008..2009
+    m = re.search(r"\b(20\d{2})\s*[-/]\s*(\d{2})\b", low)
+    if m:
+        y1 = int(m.group(1))
+        y2 = int(str(y1)[:2] + m.group(2))
+        return (y1, y2) if y1 <= y2 else (y2, y1)
+
+    # 1) Explicit ranges: "between 1998 and 2003" or "from 1998 to 2003"
+    m = re.search(r"(?:between|from)\s*((?:18|19|20)\d{2})\s*(?:and|to|-)\s*((?:18|19|20)\d{2})", low)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        return min(a, b), max(a, b)
+
+    # 2) Before / prior to / earlier than / through / up to / by (end)
+    m = re.search(r"\b(before|prior to|earlier than|through|up to|by)\s*((?:18|19|20)\d{2})\b", low)
+    if m:
+        year = int(m.group(2))
+        if m.group(1) in {"through", "up to", "by"}:
+            return None, year
+        return None, year - 1
+
+    # 3) After / later than / since
+    m = re.search(r"\b(after|later than|since)\s*((?:18|19|20)\d{2})\b", low)
+    if m:
+        year = int(m.group(2))
+        if m.group(1) == "since":
+            return year, None
+        return year + 1, None
+
+    # 4) "in 1997", "in 2004"
+    m = re.search(r"\bin\s*((?:18|19|20)\d{2})\b", low)
+    if m:
+        y = int(m.group(1))
+        return y, y
+
+    # 5) Decades: "2000s", "1990s", "'90s" with optional early/mid/late
+    # a) 4-digit decades like "2000s"
+    m = re.search(r"\b(early|mid|late)?\s*((?:18|19|20)\d{2})s\b", low)
+    if m:
+        eml = (m.group(1) or "").strip().lower()
+        base = int(m.group(2))
+        start = base
+        end = base + 9
+        if eml in DECADE_OFFSETS:
+            off = DECADE_OFFSETS[eml]
+            return start + off[0], start + off[1]
+        return start, end
+
+    # b) 3-digit + decade like "1990s"
+    m = re.search(r"\b(early|mid|late)?\s*((?:18|19|20)\d)0s\b", low)
+    if m:
+        eml = (m.group(1) or "").strip().lower()
+        base = int(m.group(2)) * 10
+        start = base
+        end = base + 9
+        if eml in DECADE_OFFSETS:
+            off = DECADE_OFFSETS[eml]
+            return start + off[0], start + off[1]
+        return start, end
+
+    # c) "'90s" or "90s" → assume 1990s unless 00–29 → 2000s/2010s/2020s
+    m = re.search(r"\b(early|mid|late)?\s*['']?(\d{2})s\b", low)
+    if m:
+        eml = (m.group(1) or "").strip().lower()
+        yy = int(m.group(2))
+        century = 1900 if yy >= 30 else 2000
+        start = century + (yy // 10) * 10
+        end = start + 9
+        if eml in DECADE_OFFSETS:
+            off = DECADE_OFFSETS[eml]
+            return start + off[0], start + off[1]
+        return start, end
+
+    # 6) Plain year mentions (first two)
+    yrs = [int(y) for y in re.findall(r"\b((?:18|19|20)\d{2})\b", low)]
+    if len(yrs) == 1:
+        return yrs[0], yrs[0]
+    if len(yrs) >= 2:
+        return min(yrs[:2]), max(yrs[:2])
+
     return (None, None)
 
+# --- PATCH: boundary-aware event extraction (no 200 from 2000s) ---
+_EVENT_MULTIWORD = [
+    "long jump", "triple jump", "high jump", "pole vault", "shot put", "discus"
+]
+
+
+def _mask_decades(text: str) -> str:
+    t = text
+    # Mask 4-digit decades like 2000s, 2010s
+    t = re.sub(r"\b(?:18|19|20)\d{2}s\b", " ", t)
+    # Mask 1990s/1980s pattern
+    t = re.sub(r"\b(?:18|19|20)\d0s\b", " ", t)
+    # Mask '90s/90s pattern
+    t = re.sub(r"\b[’']?\d{2}s\b", " ", t)
+    return t
+
+
 def _extract_events_anywhere(q: str) -> set:
-    low = q.lower(); events = set()
-    for k in EVENT_CANONICAL.keys():
-        if k in low: events.add(EVENT_CANONICAL[k])
-    for m in re.findall(r"\b(55|100|200|400|800|1600|3200|lj|tj|hj|pv|300h|110h|100h)\b", low):
-        ev = canonical_event(m, None)
-        if ev: events.add(ev)
-    for phrase in ["long jump","triple jump","high jump","pole vault","shot put","discus"]:
-        if phrase in low: events.add(EVENT_CANONICAL[phrase])
+    low = q.lower().replace("’", "'")
+    masked = _mask_decades(low)
+    events = set()
+
+    # 1) Multi-word event phrases
+    for phrase in _EVENT_MULTIWORD:
+        if re.search(rf"\b{re.escape(phrase)}\b", masked):
+            events.add(EVENT_CANONICAL[phrase])
+
+    # 2) Explicit hurdle short codes
+    for code in ["300h", "110h", "100h"]:
+        if re.search(rf"\b{code}\b", masked):
+            ev = canonical_event(code, None)
+            if ev:
+                events.add(ev)
+
+    # 3) Numeric events with digit guards to avoid years/decades
+    for num in ["55", "100", "200", "400", "800", "1600", "3200"]:
+        if re.search(rf"(?<!\d)\b{num}\b(?!\d|0s)", masked):
+            ev = canonical_event(num, None)
+            if ev:
+                events.add(ev)
+
+    # 4) Canonical synonyms with word boundaries (skip pure numeric keys)
+    for k, v in EVENT_CANONICAL.items():
+        if k.isdigit():
+            continue
+        if re.search(rf"\b{re.escape(k)}\b", masked):
+            events.add(v)
+
+    # 5) Group expansions (sprints/distance/etc.)
     events |= _expand_event_groups(_tokenize_phrases(q))
     return events
 
+
 def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
+    # Normalize typographic apostrophes upfront so regexes match '90s etc.
+    q_norm = q.replace("’", "'")
     out = {
         "intent": None, "scope": None,
         "genders": [], "events": set(), "meets": [],
@@ -817,7 +1009,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         "year_from": None, "year_to": None,
         "raw": q, "top_n": 10, "track_only": False
     }
-    low = q.lower()
+    low = q_norm.lower()
 
     # Personal Record
     if (re.search(r"\b(pr|pb)\b", low) or
@@ -828,16 +1020,22 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     # Title Count
     if re.search(r"\bhow many\b.*\b(championships?|titles?)\b", low):
         out["intent"] = "count_titles"
-        if "state" in low:   out["scope"] = "state"
-        if "indoor" in low:  out["scope"] = "indoor"
-        if "outdoor" in low: out["scope"] = "outdoor"
+        if "state" in low:
+            out["scope"] = "state"
+        if "indoor" in low:
+            out["scope"] = "indoor"
+        if "outdoor" in low:
+            out["scope"] = "outdoor"
 
     # MVP
     if "mvp" in low or "most valuable" in low:
         out["intent"] = "mvp_lookup"
-        if "indoor" in low:          out["scope"] = "indoor"
-        elif "outdoor" in low:       out["scope"] = "outdoor"
-        elif "cross country" in low: out["scope"] = "cross country"
+        if "indoor" in low:
+            out["scope"] = "indoor"
+        elif "outdoor" in low:
+            out["scope"] = "outdoor"
+        elif "cross country" in low:
+            out["scope"] = "cross country"
 
     # Leaderboard
     if (re.search(r"\b(most|record)\b.*\b(win|wins|won|titles?|races?)\b", low) or
@@ -878,30 +1076,30 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     if "race" in low or "races" in low:
         out["track_only"] = True
 
-    yf, yt = _extract_year_range(q)
+    yf, yt = _extract_year_range(q_norm)
     out["year_from"], out["year_to"] = yf, yt
 
     g_tokens = []
-    for tok in re.findall(r"[A-Za-z]+", q):
+    for tok in re.findall(r"[A-Za-z]+", q_norm):
         lt = tok.lower()
         if lt in GENDER_CANONICAL:
             g_tokens.append(GENDER_CANONICAL[lt])
     out["genders"] = sorted(set(g_tokens))
 
     out["meets"] = _find_multi_targets(low, MEET_CANONICAL)
-    out["events"] = _extract_events_anywhere(q)
+    out["events"] = _extract_events_anywhere(q_norm)
 
-    for m in re.finditer(r"\b(?:from|at|by)\s+([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*)+)", q):
+    for m in re.finditer(r"\b(?:from|at|by)\s+([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*)+)", q_norm):
         out["schools"].append(m.group(1).strip())
-    for m in re.finditer(r"\"([^\"]+)\"", q):
+    for m in re.finditer(r"\"([^\"]+)\"", q_norm):
         out["athletes"].append(m.group(1).strip())
-    m = re.search(r"\b(?:has|did|for|by|from|at)\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
+    m = re.search(r"\b(?:has|did|for|by|from|at)\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q_norm)
     if m:
         out["athletes"].append(m.group(1).strip())
-    m = re.search(r"\bby\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q)
+    m = re.search(r"\bby\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)", q_norm)
     if m:
         out["athletes"].append(m.group(1).strip())
-    for m in re.finditer(r"\b([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)'s\b", q):
+    for m in re.finditer(r"\b([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+)+)'s\b", q_norm):
         out["athletes"].append(m.group(1).strip())
 
     out["schools"]  = list(dict.fromkeys(out["schools"]))
@@ -915,8 +1113,12 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
 
     return out
 
+
 def apply_multi_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
     cur = df.copy()
+    # Ensure numeric year column for robust filtering
+    cur["year_num"] = pd.to_numeric(cur.get("year"), errors="coerce")
+
     if f["genders"]:
         cur = cur[cur["gender"].isin(set(f["genders"]))]
     if f["meets"]:
@@ -939,12 +1141,13 @@ def apply_multi_filters(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.Dat
         cur = cur[mask]
     yf, yt = f.get("year_from"), f.get("year_to")
     if yf and yt:
-        cur = cur[(cur["year"] >= yf) & (cur["year"] <= yt)]
+        cur = cur[(cur["year_num"] >= yf) & (cur["year_num"] <= yt)]
     elif yf and not yt:
-        cur = cur[cur["year"] >= yf]
+        cur = cur[cur["year_num"] >= yf]
     if f.get("track_only"):
         cur = cur[cur["event"].isin(TRACK_EVENTS)]
     return cur.sort_values(["gender","event","meet","year"], ascending=[True,True,True,False])
+
 
 def leaderboard_wins(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFrame:
     cur = apply_multi_filters(df, f)
@@ -958,6 +1161,7 @@ def leaderboard_wins(df: pd.DataFrame, f: Dict[str, Optional[str]]) -> pd.DataFr
 # ----------------------------
 # Timeline helper
 # ----------------------------
+
 def plot_timeline_year_counts(df: pd.DataFrame, *, title: str, year_col: str = "year"):
     chart_df = (
         df.dropna(subset=[year_col])
@@ -1067,6 +1271,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 # ----------------------------
 # Helpers (deep-link support for Q if needed)
 # ----------------------------
+
 def _get_q_from_url():
     try:
         params = st.query_params
@@ -1082,6 +1287,7 @@ def _get_q_from_url():
         except Exception:
             pass
     return ""
+
 
 def _set_q_in_url(qval: str):
     try:
@@ -1121,6 +1327,7 @@ with tab1:
     c_q, c_btn = st.columns([0.8, 0.2])
     prefill = st.session_state.get("q_prefill", "")
     q = c_q.text_input("Type your question", value=prefill)
+
     def _clear_q():
         st.session_state["q_prefill"] = ""
         try:
@@ -1131,6 +1338,7 @@ with tab1:
             except Exception:
                 pass
         st.rerun()
+
     if c_btn.button("Clear question"):
         _clear_q()
     if q:
@@ -1141,7 +1349,7 @@ with tab1:
         if fm.get("genders"):
             parts.append("**Gender:** " + ", ".join([g.title() for g in fm["genders"]]))
         if fm.get("events"):
-            parts.append("**Events:** " + ", ".join(sorted(fm["events"])))
+            parts.append("**Events:** " + ", ".join(sorted(fm["events"])) )
         if fm.get("meets"):
             parts.append("**Meets:** " + ", ".join(fm["meets"]))
         if fm.get("schools"):
@@ -1253,8 +1461,10 @@ with tab1:
             scope_map = {"indoor": "Indoor", "outdoor": "Outdoor", "cross country": "Cross Country"}
             mvps_scope = scope_map.get(f_multi.get("scope"), None)
             cur = mvps_df.copy()
-            if mvps_scope: cur = cur[cur["scope"] == mvps_scope]
-            if f_multi["genders"]: cur = cur[cur["gender"].isin(f_multi["genders"])]
+            if mvps_scope:
+                cur = cur[cur["scope"] == mvps_scope]
+            if f_multi["genders"]:
+                cur = cur[cur["gender"].isin(f_multi["genders"])]
             if f_multi["schools"]:
                 mask = pd.Series(False, index=cur.index)
                 for s in f_multi["schools"]:
@@ -1303,7 +1513,8 @@ with tab1:
             cur = cur[~cur["event"].isin(EVENT_GROUPS["relays"])]
             if cur.empty:
                 st.error("No matching winner. Try specifying gender/event/meet more precisely.")
-                with st.expander("Detected filters"): st.json(f_multi)
+                with st.expander("Detected filters"):
+                    st.json(f_multi)
                 st.stop()
             latest_year = int(cur["year"].max())
             latest_rows = cur[cur["year"] == latest_year].sort_values(["gender","meet","event"])
@@ -1311,7 +1522,7 @@ with tab1:
             info_card(
                 title=f"{str(r0['gender']).title()} — {r0['event']} — {r0['meet']}",
                 lines=[
-                    ("Year", str(int(r0["year"])) if pd.notna(r0["year"]) else ""),  # ensure whole number
+                    ("Year", str(int(r0["year"])) if pd.notna(r0["year"]) else ""),
                     ("Athlete", str(r0["name"])),
                     ("Time/Mark", str(r0["mark"])),
                     ("School", str(r0["school"])),
@@ -1351,12 +1562,13 @@ with tab1:
             if cur.empty:
                 st.error("No matches for the specified sweep filters.")
             else:
-                agg = (cur.groupby(["year","meet","gender","name"])["event"].apply(set).reset_index(name="events_won"))
+                agg = (cur.groupby(["year","meet","gender","name"])['event'].apply(set).reset_index(name="events_won"))
                 agg["has_all"] = agg["events_won"].apply(lambda s: required_events.issubset(s))
                 sweeps = agg[agg["has_all"]]
                 if sweeps.empty:
                     st.warning("No athlete found who swept all those events at a single meet.")
-                    with st.expander("Detected filters"): st.json(f_multi)
+                    with st.expander("Detected filters"):
+                        st.json(f_multi)
                     st.stop()
                 last_year = int(sweeps["year"].max())
                 last_hits = sweeps[sweeps["year"] == last_year].sort_values(["gender","meet","name"])
@@ -1388,7 +1600,8 @@ with tab1:
                 st.stop()
             if lb.empty:
                 st.error("No matching winners found for your leaderboard filters.")
-                with st.expander("Detected filters"): st.json(f_multi)
+                with st.expander("Detected filters"):
+                    st.json(f_multi)
             else:
                 show_table(lb.reset_index(drop=True)[["gender","name","school","wins"]])
             st.stop()
@@ -1424,13 +1637,12 @@ with tab1:
 
             cur = cur.sort_values(["gender","event"])
 
-            # Prefer a single best row for clarity (dataset should already be 1 per event+gender)
             r0 = cur.iloc[0]
-            yr_str = str(int(r0["year"])) if pd.notna(r0["year"]) else ""  # ensure whole number year
+            yr_str = str(int(r0["year"])) if pd.notna(r0["year"]) else ""
             info_card(
                 title=f"{season_label} — {str(r0['gender']).title()} — {r0['event']} (State Record)",
                 lines=[
-                    ("Athlete(s)", str(r0["name"] or r0["school"] or "")),  # label updated
+                    ("Athlete(s)", str(r0["name"] or r0["school"] or "")),
                     ("Time/Mark", str(r0["mark"])),
                     ("School", str(r0["school"] or "")),
                     ("Year", yr_str),
@@ -1446,7 +1658,7 @@ with tab1:
                 st.error("All‑time workbook not loaded. Add it to the repo to use PR/PB queries.")
                 st.stop()
             if not f_multi["athletes"]:
-                st.info('I couldn’t identify the athlete’s name. Try quoting it, e.g., “What is "Jarod Wilson"’s PR in the 800?”')
+                st.info('I couldn’t identify the athlete’s name. Try quoting it, e.g., “What is "Jarod Wilson”’s PR in the 800?”')
                 st.stop()
             if not f_multi["events"]:
                 st.info('Please specify the event, e.g., “PR in the 800” or “personal best in long jump”.')
@@ -1495,7 +1707,8 @@ with tab1:
         if f_multi.get("intent") == "records_lookup":
             if alltime_df is None or alltime_df.empty:
                 st.error("All‑time workbook not loaded. Add it to the repo to use records queries.")
-                with st.expander("Detected filters"): st.json(f_multi)
+                with st.expander("Detected filters"):
+                    st.json(f_multi)
                 st.stop()
             genders = f_multi.get("genders") or sorted(alltime_df["gender"].dropna().unique().tolist())
             events  = sorted(f_multi.get("events") or [])
@@ -1515,7 +1728,8 @@ with tab1:
                 cur = cur[cur["year"].astype("float") >= yf]
             if cur.empty:
                 st.error("No all‑time entries matched your filters.")
-                with st.expander("Detected filters"): st.json(f_multi)
+                with st.expander("Detected filters"):
+                    st.json(f_multi)
                 st.stop()
             topn = 1 if (re.search(r"\bwho\b", f_multi["raw"].lower()) and len(events) == 1) else 10
             m_top = re.search(r"\btop\s+(\d+)\b", f_multi["raw"].lower())
@@ -1537,7 +1751,7 @@ with tab1:
                 info_card(
                     title=f"{str(r0['gender']).title()} — {r0['event']} (All‑time best)",
                     lines=[
-                        ("Athlete(s)", str(r0["name"])),  # label aligned
+                        ("Athlete(s)", str(r0["name"])),
                         ("Time/Mark", str(r0["mark"])),
                         ("School", str(r0["school"] or "")),
                         ("Year", yr_str),
@@ -1556,7 +1770,8 @@ with tab1:
         result = apply_multi_filters(df, f_multi)
         if result.empty:
             st.error("No matches found. Try adjusting events/meets/schools/years.")
-            with st.expander("Detected filters"): st.json(f_multi)
+            with st.expander("Detected filters"):
+                st.json(f_multi)
         else:
             if (f_multi.get("year_from") == f_multi.get("year_to")
                 and len(f_multi.get("events", [])) == 1
@@ -1735,7 +1950,7 @@ with tab6:
 
     # Season switcher (Outdoor default, Indoor only if available)
     has_indoor = 'state_records_df_indoor' in globals() and state_records_df_indoor is not None and not state_records_df_indoor.empty
-    season = st.radio("Season", options=(["Outdoor", "Indoor"] if has_indoor else ["Outdoor"]), horizontal=True, index=0)
+    season = st.radio("Season", options=( ["Outdoor", "Indoor"] if has_indoor else ["Outdoor"] ), horizontal=True, index=0)
 
     cur_df = state_records_df if season == "Outdoor" else state_records_df_indoor
     if cur_df is None or cur_df.empty:
@@ -1775,7 +1990,7 @@ with tab6:
                             ("School", str(r["school"] or "")),
                             ("Meet", str(r["meet"] or "")),
                             ("Location", str(r["location"] or "")),
-                            ("Year", str(int(r["year"])) if pd.notna(r["year"]) else ""),  # whole number
+                            ("Year", str(int(r["year"])) if pd.notna(r["year"]) else ""),
                         ],
                     )
             if not girls.empty:
@@ -1789,7 +2004,7 @@ with tab6:
                             ("School", str(r["school"] or "")),
                             ("Meet", str(r["meet"] or "")),
                             ("Location", str(r["location"] or "")),
-                            ("Year", str(int(r["year"])) if pd.notna(r["year"]) else ""),  # whole number
+                            ("Year", str(int(r["year"])) if pd.notna(r["year"]) else ""),
                         ],
                     )
             st.divider()
