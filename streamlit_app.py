@@ -801,7 +801,7 @@ def _extract_events_anywhere(q: str) -> set:
             if ev:
                 events.add(ev)
 
-    for k, v in EVENT_CANONICAL.items():
+    for k, v in EVENT_CANONICAL items():
         if k.isdigit():
             continue
         if re.search(rf"\b{re.escape(k)}\b", masked):
@@ -853,7 +853,7 @@ def _extract_year_range(q: str):
     if len(yrs) >= 2: return (min(yrs[:2]), max(yrs[:2]))
     return (None, None)
 
-# ---- MISSING HELPER (added): find targets (e.g., meets) in text ----
+# ---- MISSING HELPER (added earlier): find targets (e.g., meets) in text ----
 
 def _find_multi_targets(q: str, vocabulary: Dict[str, str]) -> List[str]:
     """
@@ -911,10 +911,9 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     for m in re.finditer(r"\bwinner\s+from\s+([A-Z][A-Za-z.&'-]+(?:\s+[A-Z][A-Za-z.&'-]+)*)\b", q_norm):
         out["maybe_school_phrases"].append(m.group(1).strip())
 
-    # School-win count (priority when school but no athlete)
+    # School-win count (narrowed): require clear school phrase or preposition indicating a school, not generic "a"/"an"
     if (re.search(r"\bhow many\b.*\bwon\b", low) and
-        (" by " in low or " for " in low or " a " in low or " an " in low or
-         " athlete " in low or " runner " in low or out["maybe_school_phrases"])):
+        (out["maybe_school_phrases"] or re.search(r"\b(from|for|by|of|out of|representing|with|at)\b", low))):
         out["intent"] = "count_school_titles"
 
     # Athlete-specific wins possible flag
@@ -978,6 +977,10 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     out["meets"] = _find_multi_targets(low, MEET_CANONICAL)
     out["events"] = _extract_events_anywhere(q_norm)
 
+    # >>> PRIORITIZE SWEEP COUNT WHEN MULTI-EVENT & NO ATHLETE NAME <<<
+    if re.search(r"\bhow many\b.*\bwon\b", low) and len(out["events"]) >= 2 and not out["athletes"]:
+        out["intent"] = "sweep_count"
+
     # schools and athletes
     for m in re.finditer(r"\b(?:from|for|by|of|out of|representing|with|at)\s+([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*)+)\b", q_norm):
         out["schools"].append(m.group(1).strip())
@@ -992,7 +995,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     out["schools"]  = list(dict.fromkeys(out["schools"]))
     out["athletes"] = list(dict.fromkeys(out["athletes"]))
 
-    # NEW: Sweep count intent — multiple events & no athlete name
+    # NEW: Sweep count intent — multiple events & no athlete name (kept, but priority was set above)
     if re.search(r"\bhow many\b.*\bwon\b", low) and len(out["events"]) >= 2 and not out["athletes"]:
         out["intent"] = "sweep_count"
 
@@ -1075,6 +1078,33 @@ def plot_timeline_year_counts(df: pd.DataFrame, *, title: str, year_col: str = "
 
 st.set_page_config(page_title="Delaware Online Sports Compendium", page_icon="🏃", layout="wide")
 st.title("Delaware Online Sports Compendium")
+
+# ---- Global CSS: left-align all table/dataframe content ----
+st.markdown(
+    """
+    <style>
+    /* st.table */
+    [data-testid="stTable"] table,
+    [data-testid="stTable"] th,
+    [data-testid="stTable"] td {
+        text-align: left !important;
+    }
+    /* st.dataframe (AG Grid) */
+    [data-testid="stDataFrame"] div[role="gridcell"],
+    [data-testid="stDataFrame"] div[role="columnheader"] {
+        justify-content: flex-start !important;
+        text-align: left !important;
+    }
+    [data-testid="stDataFrame"] .stDataFrame,
+    [data-testid="stDataFrame"] table,
+    [data-testid="stDataFrame"] td,
+    [data-testid="stDataFrame"] th {
+        text-align: left !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 APP_DIR = Path(__file__).parent
 BUNDLED_XLSX_PATH = APP_DIR / "Delaware Track and Field Supersheet (6).xlsx"
@@ -1334,9 +1364,12 @@ with tab1:
     if q and df is not None:
         f_multi = parse_question_multi(q)
 
-        # Prefer school-win over athlete-win when ambiguous
+        # Prefer school-win over athlete-win when ambiguous — but do NOT override sweep_count
         _auto_add_schools(f_multi)
-        if f_multi.get("_athlete_win_possible"):
+        # Guard: If sweep_count already chosen, don't override
+        if f_multi.get("intent") == "sweep_count":
+            pass
+        elif f_multi.get("_athlete_win_possible"):
             if f_multi.get("athletes"):
                 f_multi["intent"] = "count_athlete_wins"
             else:
