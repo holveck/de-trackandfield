@@ -521,7 +521,7 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
         try:
             if isinstance(val, (int, float)):
                 dt = pd.to_datetime(val, unit="d", origin="1899-12-30", errors="coerce")
-                return int(dt.year) if pd not in (None, '') else None
+                return int(dt.year) if pd.notna(dt) else None
             dt = pd.to_datetime(str(val), errors="coerce")
             return int(dt.year) if pd.notna(dt) else None
         except Exception:
@@ -853,6 +853,30 @@ def _extract_year_range(q: str):
     if len(yrs) >= 2: return (min(yrs[:2]), max(yrs[:2]))
     return (None, None)
 
+# ---- MISSING HELPER (added): find targets (e.g., meets) in text ----
+
+def _find_multi_targets(q: str, vocabulary: Dict[str, str]) -> List[str]:
+    """
+    Scans the query for known vocab keys (e.g., meet aliases) and returns
+    a de-duplicated, order-preserving list of canonical values.
+    """
+    toks = _tokenize_phrases(q)
+    found = []
+    keys = sorted(vocabulary.keys(), key=len, reverse=True)  # longest first
+    for t in toks:
+        for k in keys:
+            if k in t:
+                found.append(vocabulary[k])
+                break
+    # de-dupe, preserve first-seen order
+    seen = set()
+    ordered = []
+    for x in found:
+        if x not in seen:
+            seen.add(x)
+            ordered.append(x)
+    return ordered
+
 
 def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
     q_norm = q.replace("’", "'")
@@ -872,7 +896,7 @@ def parse_question_multi(q: str) -> Dict[str, Optional[str]]:
         (("fastest" in low or "best" in low) and "'" in low)):
         out["intent"] = "personal_record"
 
-    # Title Count
+    # Title Count (athlete total titles)
     if re.search(r"\bhow many\b.*\b(championships?|titles?)\b", low):
         out["intent"] = "count_titles"
         if "state" in low: out["scope"] = "state"
@@ -1322,6 +1346,24 @@ with tab1:
         _apply_state_default(f_multi, f_multi["raw"])
         _render_understood(f_multi)
 
+        # --- If user said just "state meet", offer a quick picker to choose which state meet(s)
+        low_raw = f_multi["raw"].lower()
+        try_show_state_picker = (
+            ("state" in low_raw and "meet" in low_raw) and
+            ("indoor" not in low_raw) and ("outdoor" not in low_raw) and
+            (not any(x in low_raw for x in ["division i","division 1","division ii","division 2","d1","d2"])) and
+            set(f_multi.get("meets") or []) == STATE_MEETS_ALL
+        )
+        if try_show_state_picker:
+            st.info("You said **state meet** — which one did you mean?")
+            meet_options = ["Indoor State Championship", "Division I", "Division II"]
+            picks = st.multiselect(
+                "Choose state meet(s)", options=meet_options, default=meet_options,
+                help="Pick Indoor and/or an Outdoor division."
+            )
+            if picks:
+                f_multi["meets"] = picks
+
         # ------------- Handlers -------------
 
         # Title count
@@ -1588,7 +1630,7 @@ with tab1:
             cur = cur.dropna(subset=["year", "value"]).sort_values(["event","gender","year"])
             title_bits = []
             if f_multi["genders"]: title_bits.append("/".join([g.title() for g in f_multi["genders"]]))
-            if f_multi["events"]:  title_bits.append(", ".join(sorted(f_multi["events"])))
+            if f_multi["events"]:  title_bits.append(", ".join(sorted(f_multi["events"])) )
             if f_multi["meets"]:   title_bits.append(", ".join(f_multi["meets"]))
             yf, yt = f_multi.get("year_from"), f_multi.get("year_to")
             if yf and yt and yf == yt: title_bits.append(f"{yf}")
@@ -1619,7 +1661,7 @@ with tab1:
             if not events: st.info("Please specify at least one event for all‑time records, e.g., “girls 400 all‑time”."); st.stop()
             cur = alltime_df.copy()
             cur = cur[cur["gender"].isin(genders)]
-            cur = cur[cur["event"]].isin(events)
+            cur = cur[cur["event"].isin(events)]
             if meets: cur = cur[cur["meet"].isin(meets)]
             if yf and yt: cur = cur[(cur["year"].astype("float") >= yf) & (cur["year"].astype("float") <= yt)]
             elif yf and not yt: cur = cur[cur["year"].astype("float") >= yf]
