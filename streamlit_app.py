@@ -647,7 +647,7 @@ def all_athletes_index(df: pd.DataFrame) -> pd.DataFrame:
 
 def title_count(df: pd.DataFrame, athlete_name: str, *, include_meets: set, include_relays: bool = False):
     nn = normalize_name(athlete_name)
-    cur = df.copy()
+    cur = _format_rank_column(df.copy())
     cur["name_norm"] = cur["name"].apply(normalize_name)
     cur = cur[cur["name_norm"] == nn]
     cur = cur[cur["meet"].isin(include_meets)]
@@ -1363,11 +1363,10 @@ with tab1:
             fm['schools'] = list(dict.fromkeys([s for s in fm['schools'] if isinstance(s, str) and s.strip()]))
 
     def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
-    # Do NOT inject meet defaults for state record queries
-    if fm.get("intent") == "state_records_lookup":
-        return
+            if fm.get("intent") =="state_records_lookup":
+                return
 
-    lowx = text.lower()
+            lowx = text.lower()
         # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
         if ("state meet" in lowx or ("state" in lowx and "meet" in lowx)) and not fm["meets"]:
             fm["meets"] = list(STATE_MEETS_ALL)
@@ -1457,7 +1456,7 @@ with tab1:
                 if not f_multi["events"]: st.info("Please specify the event (e.g., 'boys 400')."); st.stop()
                 if not f_multi["meets"]:  st.info("Please specify the meet (e.g., 'Meet of Champions')."); st.stop()
                 genders_to_check = f_multi["genders"] if f_multi["genders"] else guess_gender_for_name(df, athlete)
-                cur = df.copy()
+                cur = _format_rank_column(df.copy())
                 cur["name_norm"] = cur["name"].apply(normalize_name)
                 athlete_norm = normalize_name(athlete)
                 cur = cur[cur["name_norm"] == athlete_norm]
@@ -1553,7 +1552,7 @@ with tab1:
                 st.info("Please specify at least two events for a sweep (e.g., 800, 1600 and 3200)."); st.stop()
             if not f_multi["genders"]:
                 st.info("Please specify the gender (e.g., 'girls' or 'boys')."); st.stop()
-            cur = df.copy()
+            cur = _format_rank_column(df.copy())
             cur = cur[cur["gender"].isin(f_multi["genders"]) ]
             cur = cur[cur["meet"].isin(f_multi["meets"]) ]
             cur = cur[cur["event"].isin(required_events)]
@@ -1632,7 +1631,7 @@ with tab1:
             required_events = set(f_multi["events"])
             if len(required_events) < 2:
                 st.info("Please specify at least two events for a sweep check (e.g., 800, 1600 and 3200)."); st.stop()
-            cur = df.copy()
+            cur = _format_rank_column(df.copy())
             if f_multi["genders"]: cur = cur[cur["gender"].isin(f_multi["genders"]) ]
             if f_multi["meets"]:   cur = cur[cur["meet"].isin(f_multi["meets"]) ]
             cur = cur[cur["event"].isin(required_events)]
@@ -1783,7 +1782,7 @@ with tab2:
         yrs = sorted(df["year"].dropna().unique().tolist(), reverse=True)
         y   = c4.selectbox("Year", options=["(any)"] + yrs)
         who = c5.text_input("Athlete / School contains")
-        cur = df.copy()
+        cur = _format_rank_column(df.copy())
         if g != "(any)": cur = cur[cur["gender"] == g]
         if m != "(any)": cur = cur[cur["meet"] == m]
         if ev != "(any)": cur = cur[cur["event"] == ev]
