@@ -1363,9 +1363,10 @@ with tab1:
             fm['schools'] = list(dict.fromkeys([s for s in fm['schools'] if isinstance(s, str) and s.strip()]))
 
     def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
-    # Do not inject state-meet defaults for state-record queries
-    if fm.get("intent") == "state_records_lookup":
+    # Do NOT inject meet defaults for state record queries
+        if fm.get("intent") == "state_records_lookup":
         return
+
         lowx = text.lower()
         # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
         if ("state meet" in lowx or ("state" in lowx and "meet" in lowx)) and not fm["meets"]:
