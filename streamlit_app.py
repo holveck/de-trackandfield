@@ -1367,6 +1367,7 @@ with tab1:
                 return
 
             lowx = text.lower()
+        
         # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
         if ("state meet" in lowx or ("state" in lowx and "meet" in lowx)) and not fm["meets"]:
             fm["meets"] = list(STATE_MEETS_ALL)
