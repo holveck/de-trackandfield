@@ -801,7 +801,7 @@ def _extract_events_anywhere(q: str) -> set:
             if ev:
                 events.add(ev)
 
-    for k, v in EVENT_CANONICAL items():
+    for k, v in EVENT_CANONICAL.items():
         if k.isdigit():
             continue
         if re.search(rf"\b{re.escape(k)}\b", masked):
