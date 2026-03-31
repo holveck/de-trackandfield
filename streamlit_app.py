@@ -1365,7 +1365,7 @@ with tab1:
     def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
     # Do NOT inject meet defaults for state record queries
         if fm.get("intent") == "state_records_lookup":
-        return
+            return
 
     lowx = text.lower()
         # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
