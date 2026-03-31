@@ -616,6 +616,19 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
 # Athlete/title utilities
 # ----------------------------
 
+
+
+def _format_rank_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "rank" in df.columns:
+        df = df.copy()
+        def _fmt(v):
+            try:
+                f = float(v)
+                return str(int(f)) if f.is_integer() else str(v)
+            except Exception:
+                return str(v)
+        df["rank"] = df["rank"].apply(_fmt)
+    return df
 def normalize_name(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower()) if isinstance(s, str) else ""
 
@@ -676,7 +689,7 @@ def _pretty_headers(df: pd.DataFrame) -> pd.DataFrame:
 def show_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     if df is None:
         return
-    cur = df.copy()
+    cur = _format_rank_column(df.copy())
     if cols:
         keep = [c for c in cols if c in cur.columns]
         cur = cur[keep]
@@ -1350,10 +1363,9 @@ with tab1:
             fm['schools'] = list(dict.fromkeys([s for s in fm['schools'] if isinstance(s, str) and s.strip()]))
 
     def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
-    # Do NOT inject meet defaults for state record queries
+    # Do not inject state-meet defaults for state-record queries
     if fm.get("intent") == "state_records_lookup":
         return
-
         lowx = text.lower()
         # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
         if ("state meet" in lowx or ("state" in lowx and "meet" in lowx)) and not fm["meets"]:
