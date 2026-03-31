@@ -1362,21 +1362,23 @@ with tab1:
         if fm.get('schools'):
             fm['schools'] = list(dict.fromkeys([s for s in fm['schools'] if isinstance(s, str) and s.strip()]))
 
-    def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
-            if fm.get("intent") =="state_records_lookup":
-                return
+def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
+    if fm.get("intent") == "state_records_lookup":
+        return
 
-            lowx = text.lower()
-        
-        # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
-        if ("state meet" in lowx or ("state" in lowx and "meet" in lowx)) and not fm["meets"]:
-            fm["meets"] = list(STATE_MEETS_ALL)
-        # If 'state' w/o season and no meets yet, default to all state meets
-        if ("state" in lowx) and ("indoor" not in lowx) and ("outdoor" not in lowx) and not fm["meets"]:
-            fm["meets"] = list(STATE_MEETS_ALL)
-        # Heuristic: indoor-coded events & no meets → choose indoor state
-        if ({"100/55","100/55H","110/55H"} & set(fm.get("events", []))) and not fm["meets"]:
-            fm["meets"] = list(STATE_MEETS_INDOOR)
+    lowx = text.lower()
+
+    # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
+    if ("state meet" in lowx or ("state" in lowx and "meet" in lowx)) and not fm["meets"]:
+        fm["meets"] = list(STATE_MEETS_ALL)
+
+    # If 'state' w/o season and no meets yet, default to all state meets
+    if ("state" in lowx) and ("indoor" not in lowx) and ("outdoor" not in lowx) and not fm["meets"]:
+        fm["meets"] = list(STATE_MEETS_ALL)
+
+    # Heuristic: indoor-coded events & no meets → choose indoor state
+    if ({"100/55", "100/55H", "110/55H"} & set(fm.get("events", []))) and not fm["meets"]:
+        fm["meets"] = list(STATE_MEETS_INDOOR)
 
     if q and df is not None:
         f_multi = parse_question_multi(q)
