@@ -616,19 +616,6 @@ def load_state_records_first_sheet(file_bytes: bytes) -> pd.DataFrame:
 # Athlete/title utilities
 # ----------------------------
 
-
-
-def _format_rank_column(df: pd.DataFrame) -> pd.DataFrame:
-    if "rank" in df.columns:
-        df = df.copy()
-        def _fmt(v):
-            try:
-                f = float(v)
-                return str(int(f)) if f.is_integer() else str(v)
-            except Exception:
-                return str(v)
-        df["rank"] = df["rank"].apply(_fmt)
-    return df
 def normalize_name(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower()) if isinstance(s, str) else ""
 
@@ -647,7 +634,7 @@ def all_athletes_index(df: pd.DataFrame) -> pd.DataFrame:
 
 def title_count(df: pd.DataFrame, athlete_name: str, *, include_meets: set, include_relays: bool = False):
     nn = normalize_name(athlete_name)
-    cur = _format_rank_column(df.copy())
+    cur = df.copy()
     cur["name_norm"] = cur["name"].apply(normalize_name)
     cur = cur[cur["name_norm"] == nn]
     cur = cur[cur["meet"].isin(include_meets)]
@@ -689,7 +676,7 @@ def _pretty_headers(df: pd.DataFrame) -> pd.DataFrame:
 def show_table(df: pd.DataFrame, cols: Optional[List[str]] = None):
     if df is None:
         return
-    cur = _format_rank_column(df.copy())
+    cur = df.copy()
     if cols:
         keep = [c for c in cols if c in cur.columns]
         cur = cur[keep]
@@ -814,7 +801,7 @@ def _extract_events_anywhere(q: str) -> set:
             if ev:
                 events.add(ev)
 
-    for k, v in EVENT_CANONICAL.items():
+    for k, v in EVENT_CANONICAL items():
         if k.isdigit():
             continue
         if re.search(rf"\b{re.escape(k)}\b", masked):
@@ -1362,23 +1349,17 @@ with tab1:
         if fm.get('schools'):
             fm['schools'] = list(dict.fromkeys([s for s in fm['schools'] if isinstance(s, str) and s.strip()]))
 
-def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
-    if fm.get("intent") == "state_records_lookup":
-        return
-
-    lowx = text.lower()
-
-    # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
-    if ("state meet" in lowx or ("state" in lowx and "meet" in lowx)) and not fm["meets"]:
-        fm["meets"] = list(STATE_MEETS_ALL)
-
-    # If 'state' w/o season and no meets yet, default to all state meets
-    if ("state" in lowx) and ("indoor" not in lowx) and ("outdoor" not in lowx) and not fm["meets"]:
-        fm["meets"] = list(STATE_MEETS_ALL)
-
-    # Heuristic: indoor-coded events & no meets → choose indoor state
-    if ({"100/55", "100/55H", "110/55H"} & set(fm.get("events", []))) and not fm["meets"]:
-        fm["meets"] = list(STATE_MEETS_INDOOR)
+    def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
+        lowx = text.lower()
+        # 'state meet' mention → consider both Indoor & Outdoor if nothing else set
+        if ("state meet" in lowx or ("state" in lowx and "meet" in lowx)) and not fm["meets"]:
+            fm["meets"] = list(STATE_MEETS_ALL)
+        # If 'state' w/o season and no meets yet, default to all state meets
+        if ("state" in lowx) and ("indoor" not in lowx) and ("outdoor" not in lowx) and not fm["meets"]:
+            fm["meets"] = list(STATE_MEETS_ALL)
+        # Heuristic: indoor-coded events & no meets → choose indoor state
+        if ({"100/55","100/55H","110/55H"} & set(fm.get("events", []))) and not fm["meets"]:
+            fm["meets"] = list(STATE_MEETS_INDOOR)
 
     if q and df is not None:
         f_multi = parse_question_multi(q)
@@ -1459,7 +1440,7 @@ def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
                 if not f_multi["events"]: st.info("Please specify the event (e.g., 'boys 400')."); st.stop()
                 if not f_multi["meets"]:  st.info("Please specify the meet (e.g., 'Meet of Champions')."); st.stop()
                 genders_to_check = f_multi["genders"] if f_multi["genders"] else guess_gender_for_name(df, athlete)
-                cur = _format_rank_column(df.copy())
+                cur = df.copy()
                 cur["name_norm"] = cur["name"].apply(normalize_name)
                 athlete_norm = normalize_name(athlete)
                 cur = cur[cur["name_norm"] == athlete_norm]
@@ -1555,7 +1536,7 @@ def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
                 st.info("Please specify at least two events for a sweep (e.g., 800, 1600 and 3200)."); st.stop()
             if not f_multi["genders"]:
                 st.info("Please specify the gender (e.g., 'girls' or 'boys')."); st.stop()
-            cur = _format_rank_column(df.copy())
+            cur = df.copy()
             cur = cur[cur["gender"].isin(f_multi["genders"]) ]
             cur = cur[cur["meet"].isin(f_multi["meets"]) ]
             cur = cur[cur["event"].isin(required_events)]
@@ -1634,7 +1615,7 @@ def _apply_state_default(fm: Dict[str, Optional[str]], text: str):
             required_events = set(f_multi["events"])
             if len(required_events) < 2:
                 st.info("Please specify at least two events for a sweep check (e.g., 800, 1600 and 3200)."); st.stop()
-            cur = _format_rank_column(df.copy())
+            cur = df.copy()
             if f_multi["genders"]: cur = cur[cur["gender"].isin(f_multi["genders"]) ]
             if f_multi["meets"]:   cur = cur[cur["meet"].isin(f_multi["meets"]) ]
             cur = cur[cur["event"].isin(required_events)]
@@ -1785,7 +1766,7 @@ with tab2:
         yrs = sorted(df["year"].dropna().unique().tolist(), reverse=True)
         y   = c4.selectbox("Year", options=["(any)"] + yrs)
         who = c5.text_input("Athlete / School contains")
-        cur = _format_rank_column(df.copy())
+        cur = df.copy()
         if g != "(any)": cur = cur[cur["gender"] == g]
         if m != "(any)": cur = cur[cur["meet"] == m]
         if ev != "(any)": cur = cur[cur["event"] == ev]
